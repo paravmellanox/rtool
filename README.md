@@ -1,8 +1,7 @@
-ioping
-======
+rdma_mr_lat
+===========
 
-An tool to monitor I/O latency in real time.
-It shows disk latency in the same way as ping shows network latency.
+An tool to monitor RDMA MR registration latency in real time.
 
 Homepage: https://github.com/paravpandit/rtool/
 
