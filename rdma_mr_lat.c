@@ -52,6 +52,8 @@ struct run_ctx {
 	uint64_t align;
 	void *buf;
 	int huge;
+	int write_pattern;
+	char pattern;
 };
 
 #define HUGE_PAGE_KPATH "/proc/sys/vm/nr_hugepages"
@@ -81,6 +83,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "ib-dev",   .has_arg = 1, .val = 'd' },
 		{ .name = "size",     .has_arg = 1, .val = 's' },
 		{ .name = "align",    .has_arg = 1, .val = 'l' },
+		{ .name = "pattern",  .has_arg = 1, .val = 'p' },
 		{ .name = "huge",     .has_arg = 0, .val = 'u' },
 		{ .name = NULL }
 	};
@@ -90,7 +93,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:s:l:u", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:p:s:l:u", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -106,6 +109,10 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'l':
 			ctx->align = parse_size(optarg);
+			break;
+		case 'p':
+			ctx->write_pattern = 1;
+			ctx->pattern = *((char*)optarg);
 			break;
 		case 'u':
 			ctx->huge = 1;
@@ -238,6 +245,10 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		goto err;
 	}
 
+	if (ctx->write_pattern) {
+		memset(ctx->buf, ctx->pattern, ctx->size);
+	}
+ 
 	printf("Configuration\n");
 	printf("size = ");
 	print_size(ctx->size);
