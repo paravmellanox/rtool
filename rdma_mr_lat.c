@@ -45,13 +45,14 @@
 struct run_ctx {
 	struct ibv_context *context;
 	struct ibv_pd *pd;
-	struct ibv_mr *mr;
+	struct ibv_mr **mr_list;
 	char *ibdev_name;
 	uint64_t size;
 	uint64_t page_size;
 	uint64_t align;
 	void *buf;
 	int huge;
+	int count;
 	int write_pattern;
 	char pattern;
 };
@@ -66,6 +67,7 @@ static void usage(const char *argv0)
 	printf("  -d, --ibdev=<ibdev>      use IB device <dev> (default first device found)\n");
 	printf("  -s --size=<size>         size of mr in bytes (default 4096)\n");
 	printf("  -l --align=<align_size>  align memory allocation to this size\n");
+	printf("  -c --count=<count>       number of memory regions to register\n");
 	printf("  -u --huge                use huge pages\n");
 	printf("  -h                       display this help message\n");
 	printf("  -v                       display program version\n");
@@ -84,6 +86,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "size",     .has_arg = 1, .val = 's' },
 		{ .name = "align",    .has_arg = 1, .val = 'l' },
 		{ .name = "pattern",  .has_arg = 1, .val = 'p' },
+		{ .name = "count",    .has_arg = 1, .val = 'c' },
 		{ .name = "huge",     .has_arg = 0, .val = 'u' },
 		{ .name = NULL }
 	};
@@ -93,7 +96,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:p:s:l:u", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:p:s:c:l:u", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -109,6 +112,9 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'l':
 			ctx->align = parse_size(optarg);
+			break;
+		case 'c':
+			ctx->count = parse_size(optarg);
 			break;
 		case 'p':
 			ctx->write_pattern = 1;
@@ -248,13 +254,21 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	if (ctx->write_pattern) {
 		memset(ctx->buf, ctx->pattern, ctx->size);
 	}
- 
+ 	ctx->mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
+	if (!ctx->mr_list) {
+		fprintf(stderr, "Couldn't allocate mr list memory\n");
+		err = -ENOMEM;
+		goto err;
+	}
 	printf("Configuration\n");
 	printf("size = ");
 	print_size(ctx->size);
 	printf("\n");
 	printf("align = ");
 	print_size(ctx->align);
+	printf("\n");
+	printf("count = ");
+	print_size(ctx->count);
 	printf("\n");
 	printf("hugetlb = %s\n", ctx->huge ? "enabled" : "disabled");
 err:
@@ -279,6 +293,7 @@ int main(int argc, char **argv)
 	struct run_ctx *ctx;
 	long long time_now;
 	int err;
+	int i;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
 
@@ -296,6 +311,7 @@ int main(int argc, char **argv)
 	ctx->size = sysconf(_SC_PAGESIZE);
 	ctx->page_size = sysconf(_SC_PAGESIZE);
 	ctx->align = sysconf(_SC_PAGESIZE);
+	ctx->count = 1;
 
 	parse_options(ctx, argc, argv);
 
@@ -327,12 +343,14 @@ int main(int argc, char **argv)
 	time_now = current_time();
 	start_statistics(&reg_time, time_now);
 
-	ctx->mr = ibv_reg_mr(ctx->pd, ctx->buf,
-			     ctx->size, IBV_ACCESS_LOCAL_WRITE);
-	if (!ctx->mr) {
-		fprintf(stderr, "Couldn't register MR\n");
-		err = -ENOMEM;
-		goto err;
+	for (i = 0; i < ctx->count; i++) {
+		ctx->mr_list[i] = ibv_reg_mr(ctx->pd, ctx->buf,
+				     ctx->size, IBV_ACCESS_LOCAL_WRITE);
+		if (!ctx->mr_list[i]) {
+			fprintf(stderr, "Couldn't register MR\n");
+			err = -ENOMEM;
+			goto mr_cleanup;
+		}
 	}
 
 	time_now = current_time();
@@ -340,7 +358,9 @@ int main(int argc, char **argv)
 
 	start_statistics(&dereg_time, time_now);
 
-	ibv_dereg_mr(ctx->mr);
+	for (i = 0; i < ctx->count; i++) {
+		ibv_dereg_mr(ctx->mr_list[i]);
+	}
 
 	time_now = current_time();
 	finish_statistics(&dereg_time, time_now);
@@ -351,8 +371,14 @@ int main(int argc, char **argv)
 	printf("deregistration time = ");
 	print_time(dereg_time.load_time);
 	printf("\n");
+	cleanup_test(ctx);
+	ibv_free_device_list(dev_list);
 	return 0;
 
+mr_cleanup:
+	for (; i > 0; i--) {
+		ibv_dereg_mr(ctx->mr_list[i]);
+	}
 err:
 	cleanup_test(ctx);
 	ibv_free_device_list(dev_list);
