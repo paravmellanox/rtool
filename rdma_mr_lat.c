@@ -51,7 +51,10 @@ struct run_ctx {
 	uint64_t page_size;
 	uint64_t align;
 	void *buf;
+	int access_flags;
+
 	int huge;
+	int odp;
 	int count;
 	int write_pattern;
 	char pattern;
@@ -69,6 +72,7 @@ static void usage(const char *argv0)
 	printf("  -l --align=<align_size>  align memory allocation to this size\n");
 	printf("  -c --count=<count>       number of memory regions to register\n");
 	printf("  -u --huge                use huge pages\n");
+	printf("  -o --odp                 use ODP registration\n");
 	printf("  -h                       display this help message\n");
 	printf("  -v                       display program version\n");
 }
@@ -88,6 +92,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "pattern",  .has_arg = 1, .val = 'p' },
 		{ .name = "count",    .has_arg = 1, .val = 'c' },
 		{ .name = "huge",     .has_arg = 0, .val = 'u' },
+		{ .name = "odp",      .has_arg = 0, .val = 'o' },
 		{ .name = NULL }
 	};
 
@@ -96,7 +101,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:p:s:c:l:u", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:p:s:c:l:uo", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -122,6 +127,9 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'u':
 			ctx->huge = 1;
+			break;
+		case 'o':
+			ctx->odp = 1;
 			break;
 		}
 	}
@@ -260,6 +268,9 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		err = -ENOMEM;
 		goto err;
 	}
+	ctx->access_flags = IBV_ACCESS_LOCAL_WRITE;
+	if (ctx->odp)
+		ctx->access_flags |= IBV_ACCESS_ON_DEMAND;
 	printf("Configuration\n");
 	printf("size = ");
 	print_size(ctx->size);
@@ -271,6 +282,7 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	print_size(ctx->count);
 	printf("\n");
 	printf("hugetlb = %s\n", ctx->huge ? "enabled" : "disabled");
+	printf("odp = %s\n", ctx->odp ? "enabled" : "disabled");
 err:
 	return err;
 }
@@ -345,7 +357,7 @@ int main(int argc, char **argv)
 
 	for (i = 0; i < ctx->count; i++) {
 		ctx->mr_list[i] = ibv_reg_mr(ctx->pd, ctx->buf,
-				     ctx->size, IBV_ACCESS_LOCAL_WRITE);
+				     ctx->size, ctx->access_flags);
 		if (!ctx->mr_list[i]) {
 			fprintf(stderr, "Couldn't register MR\n");
 			err = -ENOMEM;
