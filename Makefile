@@ -1,17 +1,21 @@
-CFLAGS ?= -g -O2 -funroll-loops -ftree-vectorize
-CFLAGS += -std=gnu99 -Wall -Wextra -pedantic
-LIBS=-lm -lrt -libverbs -lhugetlbfs
+CFLAGS ?= -g -ftree-vectorize -Wformat=0
+CFLAGS += -pedantic -std=gnu99 -Wall -Wextra
+LIBS=-lm -lrt -libverbs -lhugetlbfs -lrdmacm -lpthread
 PREFIX=/usr/local
 BINDIR=$(PREFIX)/bin
 MAN1DIR=$(PREFIX)/share/man/man1
 
-SRCS=rdma_mr_lat.c options.c
-OBJS=$(SRCS:.c=.o)
-BINARY=rdma_mr_lat
-MANS=rdma_mr_lat.1
+MR_LAT_SRCS=rdma_mr_lat.c options.c
+MR_LAT_OBJS=$(MR_LAT_SRCS:.c=.o)
+MR_LAT_BINARY=rdma_mr_lat
+RDMA_IO_SRCS=rdmaio.c options.c
+RDMA_IO_OBJS=$(RDMA_IO_SRCS:.c=.o)
+RDMA_IO_BINARY=rdmaio
+
+MANS=rdma_mr_lat.1 rdmaio.1
 MANS_F=$(MANS:.1=.txt) $(MANS:.1=.pdf)
 DOCS=README.md LICENSE changelog
-SPEC=rdma_mr_lat.spec
+SPEC=rdma_mr_lat.spec rdmaio.spec
 
 PACKAGE=rdma_mr_lat
 GIT_VER:=$(shell test -d .git && git describe --tags --match 'v[0-9]*' \
@@ -19,13 +23,13 @@ GIT_VER:=$(shell test -d .git && git describe --tags --match 'v[0-9]*' \
 SRC_VER:=$(shell sed -ne 's/\#define VERSION \"\(.*\)\"/\1/p' rdma_mr_lat.c)
 VERSION:=$(SRC_VER)
 DISTDIR=$(PACKAGE)-$(VERSION)
-DISTFILES=$(SRCS) $(MANS) $(DOCS) $(SPEC) Makefile
-PACKFILES=$(BINARY) $(MANS) $(MANS_F) $(DOCS)
+DISTFILES=$(MR_LAT_SRCS) $(MANS) $(DOCS) $(SPEC) Makefile
+PACKFILES=$(MR_LAT_BINARY) $(MANS) $(MANS_F) $(DOCS)
 
 STRIP=strip
 TARGET=$(shell ${CC} -dumpmachine)
 
-all: checkver $(BINARY)
+all: checkver $(MR_LAT_BINARY) $(RDMA_IO_BINARY)
 
 version: checkver
 	@echo ${VERSION}
@@ -38,14 +42,16 @@ checkver:
 	fi
 
 clean:
-	$(RM) -f $(OBJS) $(BINARY) $(MANS_F) rdma_mr_lat.tmp
+	$(RM) -f $(MR_LAT_OBJS) $(MR_LAT_BINARY) $(MANS_F) rdma_mr_lat.tmp
+	$(RM) -f $(RDMA_IO_OBJS) $(RDMA_IO_BINARY) $(MANS_F) rdmaio_lat.tmp
 
-strip: $(BINARY)
+strip: $(MR_LAT_BINARY) $(RDMA_IO_BINARY)
 	$(STRIP) $^
 
-install: $(BINARY) $(MANS)
+install: $(MR_LAT_BINARY) $(RDMA_IO_BINARY) $(MANS)
 	mkdir -p $(DESTDIR)$(BINDIR)
-	install -m 0755 $(BINARY) $(DESTDIR)$(BINDIR)
+	install -m 0755 $(MR_LAT_BINARY) $(DESTDIR)$(BINDIR)
+	install -m 0755 $(RDMA_IO_BINARY) $(DESTDIR)$(BINDIR)
 	mkdir -p $(DESTDIR)$(MAN1DIR)
 	install -m 644 $(MANS) $(DESTDIR)$(MAN1DIR)
 
@@ -61,18 +67,23 @@ install: $(BINARY) $(MANS)
 %.txt: %.1
 	MANWIDTH=80 man ./$< | col -b > $@
 
-$(BINARY): $(OBJS)
+$(MR_LAT_BINARY): $(MR_LAT_OBJS)
+	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS) $(LIBS)
+
+$(RDMA_IO_BINARY): $(RDMA_IO_OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS) $(LIBS)
 
 dist: checkver $(DISTFILES)
 	tar -cz --transform='s,^,$(DISTDIR)/,S' $^ -f $(DISTDIR).tar.gz
 
 binary-tgz: checkver $(PACKFILES)
-	${STRIP} ${BINARY}
+	${STRIP} ${MR_LAT_BINARY}
+	${STRIP} ${RDMA_IO_BINARY}
 	tar -cz --transform='s,^,$(DISTDIR)/,S' -f ${PACKAGE}-${VERSION}-${TARGET}.tgz $^
 
 binary-zip: checkver $(PACKFILES)
-	${STRIP} ${BINARY}
+	${STRIP} ${MR_LAT_BINARY}
+	${STRIP} ${RDMA_IO_BINARY}
 	ln -s . $(DISTDIR)
 	zip ${PACKAGE}-${VERSION}-${TARGET}.zip $(addprefix $(DISTDIR)/,$^)
 	rm $(DISTDIR)
