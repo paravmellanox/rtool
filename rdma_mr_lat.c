@@ -41,6 +41,7 @@
 #include <infiniband/verbs.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
 
 #include "options.h"
 
@@ -58,6 +59,7 @@ struct run_ctx {
 
 	int huge;
 	int odp;
+	int lock_memory;
 	int count;
 	int write_pattern;
 	char pattern;
@@ -77,6 +79,7 @@ static void usage(const char *argv0)
 	printf("  -r --rlimit=<bytes>      memory resource hard limit in bytes\n");
 	printf("  -u --huge                use huge pages\n");
 	printf("  -o --odp                 use ODP registration\n");
+	printf("  -L --lock                lock memory before registration\n");
 	printf("  -h                       display this help message\n");
 	printf("  -v                       display program version\n");
 }
@@ -98,6 +101,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "count",    .has_arg = 1, .val = 'c' },
 		{ .name = "huge",     .has_arg = 0, .val = 'u' },
 		{ .name = "odp",      .has_arg = 0, .val = 'o' },
+		{ .name = "lock",     .has_arg = 0, .val = 'L' },
 		{ .name = NULL }
 	};
 
@@ -106,7 +110,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:p:r:s:c:l:uo", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:p:r:s:c:l:uoL", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -138,6 +142,9 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'o':
 			ctx->odp = 1;
+			break;
+		case 'L':
+			ctx->lock_memory = 1;
 			break;
 		}
 	}
@@ -267,6 +274,15 @@ static int set_rlimit(struct run_ctx *ctx)
 	return ret;
 }
 
+static int lock_mem(struct run_ctx *ctx)
+{
+	int ret;
+
+	if (ctx->lock_memory)
+		ret = mlock(ctx->buf, ctx->size);
+	return ret;
+}
+
 static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
 	int err = 0;
@@ -284,6 +300,13 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		fprintf(stderr, "Couldn't allocate memory of size %ld\n",
 			ctx->size);
 		err = -ENODEV;
+		goto err;
+	}
+	err = lock_mem(ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't lock memory of size %ld\n",
+			ctx->size);
+		err = -ENOMEM;
 		goto err;
 	}
 
