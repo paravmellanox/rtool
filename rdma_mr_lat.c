@@ -42,6 +42,7 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/mman.h>
+#include <sys/capability.h>
 
 #include "options.h"
 
@@ -62,6 +63,7 @@ struct run_ctx {
 	int lock_memory;
 	int count;
 	int write_pattern;
+	int drop_ipc_lock_cap;
 	char pattern;
 };
 
@@ -80,6 +82,7 @@ static void usage(const char *argv0)
 	printf("  -u --huge                use huge pages\n");
 	printf("  -o --odp                 use ODP registration\n");
 	printf("  -L --lock                lock memory before registration\n");
+	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
 	printf("  -h                       display this help message\n");
 	printf("  -v                       display program version\n");
 }
@@ -102,6 +105,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "huge",     .has_arg = 0, .val = 'u' },
 		{ .name = "odp",      .has_arg = 0, .val = 'o' },
 		{ .name = "lock",     .has_arg = 0, .val = 'L' },
+		{ .name = "drop_ipc", .has_arg = 0, .val = 'D' },
 		{ .name = NULL }
 	};
 
@@ -110,7 +114,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:p:r:s:c:l:uoL", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:p:r:s:c:l:uoLD", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -145,6 +149,9 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'L':
 			ctx->lock_memory = 1;
+			break;
+		case 'D':
+			ctx->drop_ipc_lock_cap = 1;
 			break;
 		}
 	}
@@ -283,6 +290,48 @@ static int lock_mem(struct run_ctx *ctx)
 	return ret;
 }
 
+static int drop_ipc_lock_cap(void)
+{
+	cap_value_t capList[1];
+	cap_t caps;
+	int ret;
+
+	/* Retrieve caller's current capabilities */
+	caps = cap_get_proc();
+	if (caps == NULL)
+		return -EINVAL;
+
+	/* Change setting of 'capability' in the effective set of 'caps'. The
+	 * third argument, 1, is the number of items in the array 'capList'.
+	 */
+	capList[0] = CAP_IPC_LOCK;
+	ret = cap_set_flag(caps, CAP_EFFECTIVE, 1, capList, CAP_CLEAR);
+	if (ret)
+		goto err;
+
+	ret = cap_set_proc(caps);
+	if (ret)
+		goto err;
+
+	ret = cap_set_flag(caps, CAP_PERMITTED, 1, capList, CAP_CLEAR);
+	if (ret)
+		goto err;
+
+	ret = cap_set_proc(caps);
+err:
+	cap_free(caps);
+	return ret;
+}
+
+static int setup_ipc_lock_cap(struct run_ctx *ctx)
+{
+	int ret = 0;
+
+	if (ctx->drop_ipc_lock_cap)
+		ret = drop_ipc_lock_cap();
+	return ret;
+}
+
 static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
 	int err = 0;
@@ -292,6 +341,11 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		fprintf(stderr, "Couldn't change rlimit size %ld\n",
 			ctx->rlimit);
 		err = -EINVAL;
+		goto err;
+	}
+	err = setup_ipc_lock_cap(ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't drop ipc lock capability\n");
 		goto err;
 	}
 
