@@ -39,6 +39,8 @@
 #include <malloc.h>
 #include <inttypes.h>
 #include <infiniband/verbs.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 #include "options.h"
 
@@ -50,6 +52,7 @@ struct run_ctx {
 	uint64_t size;
 	uint64_t page_size;
 	uint64_t align;
+	uint64_t rlimit;
 	void *buf;
 	int access_flags;
 
@@ -71,6 +74,7 @@ static void usage(const char *argv0)
 	printf("  -s --size=<size>         size of mr in bytes (default 4096)\n");
 	printf("  -l --align=<align_size>  align memory allocation to this size\n");
 	printf("  -c --count=<count>       number of memory regions to register\n");
+	printf("  -r --rlimit=<bytes>      memory resource hard limit in bytes\n");
 	printf("  -u --huge                use huge pages\n");
 	printf("  -o --odp                 use ODP registration\n");
 	printf("  -h                       display this help message\n");
@@ -90,6 +94,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "size",     .has_arg = 1, .val = 's' },
 		{ .name = "align",    .has_arg = 1, .val = 'l' },
 		{ .name = "pattern",  .has_arg = 1, .val = 'p' },
+		{ .name = "rlimit",   .has_arg = 1, .val = 'r' },
 		{ .name = "count",    .has_arg = 1, .val = 'c' },
 		{ .name = "huge",     .has_arg = 0, .val = 'u' },
 		{ .name = "odp",      .has_arg = 0, .val = 'o' },
@@ -101,7 +106,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:p:s:c:l:uo", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:p:r:s:c:l:uo", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -120,6 +125,9 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'c':
 			ctx->count = parse_size(optarg);
+			break;
+		case 'r':
+			ctx->rlimit = parse_size(optarg);
 			break;
 		case 'p':
 			ctx->write_pattern = 1;
@@ -233,9 +241,43 @@ static void free_mem(struct run_ctx *ctx)
 	}
 }
 
+static int set_rlimit(struct run_ctx *ctx)
+{
+	struct rlimit rlim, after_rlim;
+	int ret;
+
+	ret = getrlimit(RLIMIT_MEMLOCK, &rlim);
+	if (ret)
+		return ret;
+
+	if (ctx->rlimit) {
+		rlim.rlim_cur = ctx->rlimit;
+		rlim.rlim_max = ctx->rlimit;
+		ret = setrlimit(RLIMIT_MEMLOCK, &rlim);
+		if (ret)
+			return ret;
+
+		ret = getrlimit(RLIMIT_MEMLOCK, &after_rlim);
+		if (after_rlim.rlim_max != ctx->rlimit) {
+			fprintf(stderr, "Set rlimit %ld, Got %ld\n",
+				ctx->rlimit, after_rlim.rlim_max);
+			return -EINVAL;
+		}
+	}
+	return ret;
+}
+
 static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
 	int err = 0;
+
+	err = set_rlimit(ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't change rlimit size %ld\n",
+			ctx->rlimit);
+		err = -EINVAL;
+		goto err;
+	}
 
 	err = alloc_mem(ctx);
 	if (err) {
@@ -244,6 +286,7 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		err = -ENODEV;
 		goto err;
 	}
+
 	ctx->context = ibv_open_device(ib_dev);
 	if (!ctx->context) {
 		fprintf(stderr, "Couldn't get context for %s\n",
