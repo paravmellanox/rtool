@@ -340,7 +340,6 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	if (err) {
 		fprintf(stderr, "Couldn't change rlimit size %ld\n",
 			ctx->rlimit);
-		err = -EINVAL;
 		goto err;
 	}
 	err = setup_ipc_lock_cap(ctx);
@@ -353,14 +352,12 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	if (err) {
 		fprintf(stderr, "Couldn't allocate memory of size %ld\n",
 			ctx->size);
-		err = -ENODEV;
 		goto err;
 	}
 	err = lock_mem(ctx);
 	if (err) {
 		fprintf(stderr, "Couldn't lock memory of size %ld\n",
 			ctx->size);
-		err = -ENOMEM;
 		goto err;
 	}
 
@@ -368,7 +365,6 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	if (!ctx->context) {
 		fprintf(stderr, "Couldn't get context for %s\n",
 			ibv_get_device_name(ib_dev));
-		err = -ENODEV;
 		goto err;
 	}
 
