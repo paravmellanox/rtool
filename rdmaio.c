@@ -135,6 +135,7 @@ struct run_ctx {
 	uint16_t port;	/* network byte order */
 	int connections;
 	int skip_route_resolve;
+	long long wait_time;
 
 	struct rdmacm_run_ctx r_ctx;
  	struct sockaddr_storage sockaddr;
@@ -183,6 +184,7 @@ static void usage(const char *argv0)
 	printf("  -o --odp			use ODP registration\n");
 	printf("  -p --port			server port to listen on/connect to\n");
 	printf("  -f --offset			use offset in registered MR for data transfer\n");
+	printf("  -w --wait			wait time before starting the IOs such as 1hour or 2min\n");
 	printf("  -h				display this help message\n");
 	printf("  -v				display program version\n");
 }
@@ -210,6 +212,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "port",     .has_arg = 1, .val = 'p' },
 		{ .name = "skip",     .has_arg = 0, .val = 'j' },
 		{ .name = "odp",      .has_arg = 0, .val = 'o' },
+		{ .name = "wait",     .has_arg = 1, .val = 'w' },
 		{ .name = "offset",   .has_arg = 1, .val = 'f' },
 		{ .name = NULL }
 	};
@@ -219,7 +222,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:P:S:a:C:p:n:f:l:juosc", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:P:S:a:C:p:w:n:f:l:juosc", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -268,6 +271,10 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'c':
 			ctx->host = (char*)optarg;
+			break;
+		case 'w':
+			ctx->wait_time = parse_time_seconds(optarg);
+			printf("Wait time = %lld\n", ctx->wait_time);
 			break;
 		}
 	}
@@ -863,10 +870,14 @@ static void setup_path_record(struct ibv_path_data *out,
 	out->path.preference = cached->preference;
 }
 
-static int client_send_cmds(struct rdma_connection *q, int cmd_size, int cmd_count)
+static int client_send_cmds(struct run_ctx *ctx, struct rdma_connection *q,
+			    int cmd_size, int cmd_count)
 {
 	int ret;
 	int i;
+
+	if (ctx->wait_time)
+		sleep(ctx->wait_time);
 
 	init_tx_cmd_wrs(q, cmd_size, cmd_count);
 
@@ -980,7 +991,7 @@ static int client_setup_one_connection(struct run_ctx *ctx)
 	if (ret)
 		return ret;
 
-	ret = client_send_cmds(q, sizeof(struct rdmaio_cmd),
+	ret = client_send_cmds(ctx, q, sizeof(struct rdmaio_cmd),
 			       RDMAIO_Q_DEPTH);
 	return ret;
 }

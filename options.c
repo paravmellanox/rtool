@@ -194,6 +194,11 @@ long long parse_time(const char *str)
 	return parse_suffix(str, time_suffix, 0, LLONG_MAX);
 }
 
+long long parse_time_seconds(const char *str)
+{
+	return parse_suffix(str, time_suffix, 0, LLONG_MAX) / NSEC_PER_SEC;
+}
+
 void print_suffix(long long val, struct suffix *sfx)
 {
 	int precision;
