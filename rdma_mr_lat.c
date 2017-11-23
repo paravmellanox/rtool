@@ -14,8 +14,7 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
+ *  along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef VERSION
@@ -55,6 +54,7 @@ struct run_ctx {
 	uint64_t page_size;
 	uint64_t align;
 	uint64_t rlimit;
+	uint64_t rlimit_set;
 	void *buf;
 	int access_flags;
 
@@ -136,6 +136,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'r':
 			ctx->rlimit = parse_size(optarg);
+			ctx->rlimit_set = 1;
 			break;
 		case 'p':
 			ctx->write_pattern = 1;
@@ -264,7 +265,7 @@ static int set_rlimit(struct run_ctx *ctx)
 	if (ret)
 		return ret;
 
-	if (ctx->rlimit) {
+	if (ctx->rlimit_set) {
 		rlim.rlim_cur = ctx->rlimit;
 		rlim.rlim_max = ctx->rlimit;
 		ret = setrlimit(RLIMIT_MEMLOCK, &rlim);
