@@ -45,6 +45,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <sys/capability.h>
 
 #include "options.h"
 
@@ -138,6 +139,7 @@ struct run_ctx {
 	int connections;
 	int skip_route_resolve;
 	long long wait_time;
+	int drop_ipc_lock_cap;
 
 	struct rdmacm_run_ctx r_ctx;
  	struct sockaddr_storage sockaddr;
@@ -227,7 +229,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:P:S:a:B:C:p:w:n:f:l:juosc", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:P:S:a:B:C:p:w:n:f:l:juoscD", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -285,6 +287,9 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		case 'w':
 			ctx->wait_time = parse_time_seconds(optarg);
 			printf("Wait time = %lld\n", ctx->wait_time);
+			break;
+		case 'D':
+			ctx->drop_ipc_lock_cap = 1;
 			break;
 		}
 	}
@@ -405,6 +410,48 @@ rdma_ack_event(struct run_ctx *ctx)
 	int ret;
 
 	ret = rdma_ack_cm_event(ctx->r_ctx.event);
+	return ret;
+}
+
+static int drop_ipc_lock_cap(void)
+{
+	cap_value_t capList[1];
+	cap_t caps;
+	int ret;
+
+	/* Retrieve caller's current capabilities */
+	caps = cap_get_proc();
+	if (caps == NULL)
+		return -EINVAL;
+
+	/* Change setting of 'capability' in the effective set of 'caps'. The
+	 * third argument, 1, is the number of items in the array 'capList'.
+	 */
+	capList[0] = CAP_IPC_LOCK;
+	ret = cap_set_flag(caps, CAP_EFFECTIVE, 1, capList, CAP_CLEAR);
+	if (ret)
+		goto err;
+
+	ret = cap_set_proc(caps);
+	if (ret)
+		goto err;
+
+	ret = cap_set_flag(caps, CAP_PERMITTED, 1, capList, CAP_CLEAR);
+	if (ret)
+		goto err;
+
+	ret = cap_set_proc(caps);
+err:
+	cap_free(caps);
+	return ret;
+}
+
+static int setup_ipc_lock_cap(struct run_ctx *ctx)
+{
+	int ret = 0;
+
+	if (ctx->drop_ipc_lock_cap)
+		ret = drop_ipc_lock_cap();
 	return ret;
 }
 
@@ -1044,6 +1091,12 @@ static int setup_client(struct run_ctx *ctx)
 static int setup_test(struct run_ctx *ctx)
 {
 	int err = 0;
+
+	err = setup_ipc_lock_cap(ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't drop ipc lock capability\n");
+		goto err;
+	}
 
 	err = alloc_mem(ctx);
 	if (err) {
