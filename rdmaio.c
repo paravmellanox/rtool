@@ -45,6 +45,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <sys/resource.h>
 #include <sys/capability.h>
 
 #include "options.h"
@@ -140,6 +141,8 @@ struct run_ctx {
 	int skip_route_resolve;
 	long long wait_time;
 	int drop_ipc_lock_cap;
+	uint64_t rlimit;
+	uint64_t rlimit_set;
 
 	struct rdmacm_run_ctx r_ctx;
  	struct sockaddr_storage sockaddr;
@@ -192,6 +195,7 @@ static void usage(const char *argv0)
 	printf("  -f --offset			use offset in registered MR for data transfer\n");
 	printf("  -w --wait			wait time before starting the IOs such as 1hour or 2min\n");
 	printf("  -h				display this help message\n");
+	printf("  -r --rlimit=<bytes>      	memory resource hard limit in bytes\n");
 	printf("  -v				display program version\n");
 }
 
@@ -221,6 +225,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "odp",      .has_arg = 0, .val = 'o' },
 		{ .name = "wait",     .has_arg = 1, .val = 'w' },
 		{ .name = "offset",   .has_arg = 1, .val = 'f' },
+		{ .name = "rlimit",   .has_arg = 1, .val = 'r' },
 		{ .name = NULL }
 	};
 
@@ -229,7 +234,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:P:S:a:B:C:p:w:n:f:l:juoscD", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:P:S:a:B:C:p:r:w:n:f:l:juoscD", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -277,6 +282,10 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'j':
 			ctx->skip_route_resolve = 1;
+			break;
+		case 'r':
+			ctx->rlimit = parse_size(optarg);
+			ctx->rlimit_set = 1;
 			break;
 		case 's':
 			ctx->server = 1;
@@ -410,6 +419,32 @@ rdma_ack_event(struct run_ctx *ctx)
 	int ret;
 
 	ret = rdma_ack_cm_event(ctx->r_ctx.event);
+	return ret;
+}
+
+static int set_rlimit(struct run_ctx *ctx)
+{
+	struct rlimit rlim, after_rlim;
+	int ret;
+
+	ret = getrlimit(RLIMIT_MEMLOCK, &rlim);
+	if (ret)
+		return ret;
+
+	if (ctx->rlimit_set) {
+		rlim.rlim_cur = ctx->rlimit;
+		rlim.rlim_max = ctx->rlimit;
+		ret = setrlimit(RLIMIT_MEMLOCK, &rlim);
+		if (ret)
+			return ret;
+
+		ret = getrlimit(RLIMIT_MEMLOCK, &after_rlim);
+		if (after_rlim.rlim_max != ctx->rlimit) {
+			fprintf(stderr, "Set rlimit %ld, Got %ld\n",
+				ctx->rlimit, after_rlim.rlim_max);
+			return -EINVAL;
+		}
+	}
 	return ret;
 }
 
@@ -1091,6 +1126,13 @@ static int setup_client(struct run_ctx *ctx)
 static int setup_test(struct run_ctx *ctx)
 {
 	int err = 0;
+
+	err = set_rlimit(ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't change rlimit size %ld\n",
+			ctx->rlimit);
+		goto err;
+	}
 
 	err = setup_ipc_lock_cap(ctx);
 	if (err) {
