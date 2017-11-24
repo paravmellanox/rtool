@@ -109,6 +109,8 @@ struct rdmacm_run_ctx {
 	struct rdma_cm_event *event;
 	struct rdma_cm_id *listen_cm_id;
 
+	struct sockaddr_storage local_addr;
+
 	int next_free_client_index;
 	struct rdma_connection clients[128];
 
@@ -144,7 +146,8 @@ struct run_ctx {
 
 #define HUGE_PAGE_KPATH "/proc/sys/vm/nr_hugepages"
 
-static int parse_address(struct run_ctx *ctx, const char *input_addr)
+static int parse_address(struct sockaddr_storage *sock_addr,
+			 const char *input_addr)
 {
 	struct addrinfo *info;
 	int ret;
@@ -157,9 +160,9 @@ static int parse_address(struct run_ctx *ctx, const char *input_addr)
 	}
 
 	if (info->ai_family == PF_INET)
-		memcpy(&ctx->sockaddr, info->ai_addr, sizeof(struct sockaddr_in));
+		memcpy(sock_addr, info->ai_addr, sizeof(struct sockaddr_in));
 	else if (info->ai_family == PF_INET6)
-		memcpy(&ctx->sockaddr, info->ai_addr, sizeof(struct sockaddr_in6));
+		memcpy(sock_addr, info->ai_addr, sizeof(struct sockaddr_in6));
 	else
 		ret = -1;
 	
@@ -172,7 +175,7 @@ static void usage(const char *argv0)
 	printf("Usage:\n");
 	printf("%s\n", argv0);
 	printf("Options:\n");
-	printf("  -a --address=<ip_address>	ip address to bind or connect to\n");
+	printf("  -a --address=<ip_address>	ip address to connect to\n");
 	printf("  -S --size=<size>		size of mr in bytes (default 4096)\n");
 	printf("  -l --align=<align_size>	align memory allocation to this size\n");
 	printf("  -n --count=<count>		number of wr operations\n");
@@ -181,6 +184,7 @@ static void usage(const char *argv0)
 	printf("  -s --server			run in server mode\n");
 	printf("  -c --client			run in client mode, connecting to <host>\n");
 	printf("  -C --connections		number of connections\n");
+	printf("  -B --bind			bind src addr from which to originate traffic\n");
 	printf("  -o --odp			use ODP registration\n");
 	printf("  -p --port			server port to listen on/connect to\n");
 	printf("  -f --offset			use offset in registered MR for data transfer\n");
@@ -201,6 +205,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 
 	static struct option long_options[] = {
 		{ .name = "address",  .has_arg = 1, .val = 'a' },
+		{ .name = "bind",     .has_arg = 1, .val = 'B' },
 		{ .name = "size",     .has_arg = 1, .val = 'S' },
 		{ .name = "align",    .has_arg = 1, .val = 'l' },
 		{ .name = "pattern",  .has_arg = 1, .val = 'P' },
@@ -222,7 +227,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:P:S:a:C:p:w:n:f:l:juosc", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:P:S:a:B:C:p:w:n:f:l:juosc", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -231,7 +236,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			usage(argv[0]);
 			exit(0);
 		case 'a':
-			ret = parse_address(ctx, optarg);
+			ret = parse_address(&ctx->sockaddr, optarg);
 			if (ret)
 				goto err;
 			break;
@@ -249,6 +254,11 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'C':
 			ctx->connections = parse_size(optarg);
+			break;
+		case 'B':
+			ret = parse_address(&ctx->src_sockaddr, optarg);
+			if (ret)
+				goto err;
 			break;
 		case 'P':
 			ctx->write_pattern = 1;
@@ -682,7 +692,8 @@ static int server_handle_disconnect(struct run_ctx *ctx,
 static int setup_server(struct run_ctx *ctx)
 {
 	struct rdma_cm_event *event;
-	struct sockaddr_in addr_in;
+	struct sockaddr_in *addr_in;
+	struct sockaddr_in6 *addr_in6;
 	struct rdma_cm_id *child_id;
 	int ret;
 
@@ -691,13 +702,27 @@ static int setup_server(struct run_ctx *ctx)
 	if (ret)
 		return ret;
 
-	addr_in.sin_family = AF_INET;
-	addr_in.sin_port = htons(ctx->port);
-	addr_in.sin_addr.s_addr = htonl(INADDR_ANY);
+	if (ctx->src_sockaddr.ss_family) {
+		if (ctx->src_sockaddr.ss_family == AF_INET) {
+			addr_in = (struct sockaddr_in *)&ctx->src_sockaddr;
+			addr_in->sin_port = htons(ctx->port);
+		} else {
+			addr_in6 = (struct sockaddr_in6 *)&ctx->src_sockaddr;
+			addr_in6->sin6_port = htons(ctx->port);
+		}
+	} else {
+		addr_in = (struct sockaddr_in *)&ctx->src_sockaddr;
+		addr_in->sin_family = AF_INET;
+		addr_in->sin_addr.s_addr = htonl(INADDR_ANY);
+		addr_in->sin_port = htons(ctx->port);
+	}
 
-	ret = rdma_bind_addr(ctx->r_ctx.listen_cm_id, (struct sockaddr *)&addr_in);
-	if (ret)
+	ret = rdma_bind_addr(ctx->r_ctx.listen_cm_id, (struct sockaddr *)addr_in);
+	if (ret) {
+		perror("Fail to bind: ");
+		printf("err = %s\n", gai_strerror(ret));
 		return ret;
+	}
 
 	ret = rdma_listen(ctx->r_ctx.listen_cm_id, 1024);
 	if (ret)
