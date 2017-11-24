@@ -572,8 +572,9 @@ static int rdmaio_post_recv_wr(struct rdma_connection *q, int index)
 	return ret;
 }
 
-static int setup_rx_cmds_buffers(struct rdma_connection *q,
-				 int cmd_size, int cmd_count)
+static int
+setup_rx_cmds_buffers(struct run_ctx *ctx, struct rdma_connection *q,
+		      int cmd_size, int cmd_count)
 {
 	int ret;
 	int i;
@@ -585,11 +586,10 @@ static int setup_rx_cmds_buffers(struct rdma_connection *q,
 	memset(q->rx.cmds, 0, cmd_size * cmd_count);
 
 	q->rx.cmds_mr = ibv_reg_mr(q->pd, q->rx.cmds,
-				       cmd_size * cmd_count,
-				       IBV_ACCESS_LOCAL_WRITE);
+				   cmd_size * cmd_count,
+				   ctx->access_flags);
 	if (!q->rx.cmds_mr)
 		return -ENOMEM;
-
 
 	q->rx.wrs = calloc(cmd_count, sizeof(*q->rx.wrs));
 	if (!q->rx.wrs)
@@ -737,7 +737,7 @@ static int server_handle_connect(struct run_ctx *ctx,
 		goto err;
 
 	printf("%s done accepting qp = %p\n", __func__, child_id);
-	ret = setup_rx_cmds_buffers(q, sizeof(struct rdmaio_cmd),
+	ret = setup_rx_cmds_buffers(ctx, q, sizeof(struct rdmaio_cmd),
 				    RDMAIO_Q_DEPTH);
 	if (ret)
 		goto err;
@@ -905,8 +905,9 @@ static int client_setup_cm_thread(struct run_ctx *ctx)
 	return ret;
 }
 
-static int setup_tx_cmds_buffers(struct rdma_connection *q,
-				 int cmd_size, int cmd_count)
+static int
+setup_tx_cmds_buffers(struct run_ctx *ctx, struct rdma_connection *q,
+		      int cmd_size, int cmd_count)
 {
 	q->tx.cmds = calloc(cmd_count, cmd_size);
 	if (!q->tx.cmds)
@@ -915,8 +916,8 @@ static int setup_tx_cmds_buffers(struct rdma_connection *q,
 	memset(q->tx.cmds, 0, cmd_size * cmd_count);
 
 	q->tx.cmds_mr = ibv_reg_mr(q->pd, q->tx.cmds,
-				       cmd_size * cmd_count,
-				       IBV_ACCESS_LOCAL_WRITE);
+				   cmd_size * cmd_count,
+				   ctx->access_flags);
 	if (!q->tx.cmds_mr)
 		return -ENOMEM;
 
@@ -1093,7 +1094,7 @@ static int client_setup_one_connection(struct run_ctx *ctx)
 	if (q->state != RDMAIO_CM_CONNECTED)
 		return -EINVAL;
 	
-	ret = setup_tx_cmds_buffers(q, sizeof(struct rdmaio_cmd),
+	ret = setup_tx_cmds_buffers(ctx, q, sizeof(struct rdmaio_cmd),
 				    RDMAIO_Q_DEPTH);
 	if (ret)
 		return ret;
