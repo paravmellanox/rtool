@@ -477,6 +477,7 @@ int main(int argc, char **argv)
 				     ctx->size, ctx->access_flags);
 		if (!ctx->mr_list[i]) {
 			fprintf(stderr, "Couldn't register MR\n");
+			fprintf(stderr, "Registered MR count = %d\n", i + 1);
 			err = -ENOMEM;
 			goto mr_cleanup;
 		}
