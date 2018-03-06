@@ -333,6 +333,43 @@ static int setup_ipc_lock_cap(struct run_ctx *ctx)
 	return ret;
 }
 
+static int alloc_resource_holder(struct run_ctx *ctx)
+{
+	ctx->mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
+	if (!ctx->mr_list) {
+		fprintf(stderr, "Couldn't allocate mr list memory\n");
+		return -ENOMEM;
+	}
+	return 0;
+}
+
+static int allocate_resources(struct run_ctx *ctx)
+{
+	int err = 0;
+	int i;
+
+	for (i = 0; i < ctx->count; i++) {
+		ctx->mr_list[i] =
+				ibv_reg_mr(ctx->pd, ctx->buf,
+					   ctx->size, ctx->access_flags);
+		if (!ctx->mr_list[i]) {
+			fprintf(stderr, "Registered MR count = %d\n", i + 1);
+			err = -ENOMEM;
+			break;
+		}
+	}
+	return err;
+}
+
+static void free_resources(struct run_ctx *ctx)
+{
+	int i;
+
+	for (i = 0; i < ctx->count; i++) {
+		ibv_dereg_mr(ctx->mr_list[i]);
+	}
+}
+
 static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
 	int err = 0;
@@ -379,12 +416,12 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	if (ctx->write_pattern) {
 		memset(ctx->buf, ctx->pattern, ctx->size);
 	}
- 	ctx->mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
-	if (!ctx->mr_list) {
-		fprintf(stderr, "Couldn't allocate mr list memory\n");
-		err = -ENOMEM;
+	err = alloc_resource_holder(ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't allocate resource holding memory\n");
 		goto err;
 	}
+
 	ctx->access_flags = IBV_ACCESS_LOCAL_WRITE;
 	if (ctx->odp)
 		ctx->access_flags |= IBV_ACCESS_ON_DEMAND;
@@ -472,15 +509,10 @@ int main(int argc, char **argv)
 	time_now = current_time();
 	start_statistics(&reg_time, time_now);
 
-	for (i = 0; i < ctx->count; i++) {
-		ctx->mr_list[i] = ibv_reg_mr(ctx->pd, ctx->buf,
-				     ctx->size, ctx->access_flags);
-		if (!ctx->mr_list[i]) {
-			fprintf(stderr, "Couldn't register MR\n");
-			fprintf(stderr, "Registered MR count = %d\n", i + 1);
-			err = -ENOMEM;
-			goto mr_cleanup;
-		}
+	err = allocate_resources(ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't register MR\n");
+		goto mr_cleanup;
 	}
 
 	time_now = current_time();
@@ -488,9 +520,7 @@ int main(int argc, char **argv)
 
 	start_statistics(&dereg_time, time_now);
 
-	for (i = 0; i < ctx->count; i++) {
-		ibv_dereg_mr(ctx->mr_list[i]);
-	}
+	free_resources(ctx);
 
 	time_now = current_time();
 	finish_statistics(&dereg_time, time_now);
@@ -506,7 +536,9 @@ int main(int argc, char **argv)
 	return 0;
 
 mr_cleanup:
-	for (; i > 0; i--) {
+	for (i = 0;  i < ctx->count; i++) {
+		if (!ctx->mr_list[i])
+			continue;
 		ibv_dereg_mr(ctx->mr_list[i]);
 	}
 err:
