@@ -46,12 +46,14 @@
 #include "options.h"
 
 struct run_ctx {
+	struct ibv_device *device;
 	struct ibv_context *context;
 	struct ibv_pd *pd;
 
 	union {
 		struct ibv_mr **mr_list;
 		struct ibv_pd **pd_list;
+		struct ibv_context **uctx_list;
 	} u;
 
 	uint64_t size;
@@ -89,7 +91,7 @@ static void usage(const char *argv0)
 	printf("  -o --odp                 use ODP registration\n");
 	printf("  -L --lock                lock memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
-	printf("  -R --resource            resource type (pd, mr)\n");
+	printf("  -R --resource            resource type (pd, mr, uctx)\n");
 	printf("  -h                       display this help message\n");
 	printf("  -v                       display program version\n");
 }
@@ -367,6 +369,7 @@ static int alloc_resource_holder(struct run_ctx *ctx)
 enum resource_id {
 	RTYPE_PD,
 	RTYPE_MR,
+	RTYPE_UCTX,
 	RTYPE_MAX
 };
 
@@ -378,6 +381,7 @@ struct resource_info {
 static const struct resource_info resource_types[] = {
 	{ RTYPE_PD, "pd", },
 	{ RTYPE_MR, "mr", },
+	{ RTYPE_UCTX, "uctx", },
 	{ -1, NULL, },
 };
 
@@ -393,6 +397,22 @@ static int check_resource_type(char *type)
 		}
 		err = resource_types[i].id;
 		break;
+	}
+	return err;
+}
+
+static int allocate_uctx(struct run_ctx *ctx)
+{
+	int err = 0;
+
+	int i;
+	for (i = 0; i < ctx->count; i++) {
+		ctx->u.uctx_list[i] = ibv_open_device(ctx->device);
+		if (!ctx->u.uctx_list[i]) {
+			fprintf(stderr, "alloc pd count = %d\n", i + 1);
+			err = -ENOMEM;
+			break;
+		}
 	}
 	return err;
 }
@@ -440,6 +460,9 @@ static int allocate_resources(struct run_ctx *ctx)
 		return err;
 
 	switch (err) {
+	case RTYPE_UCTX:
+		err = allocate_uctx(ctx);
+		break;
 	case RTYPE_PD:
 		err = allocate_pds(ctx);
 		break;
@@ -448,6 +471,17 @@ static int allocate_resources(struct run_ctx *ctx)
 		break;
 	}
 	return err;
+}
+
+static void free_uctx(struct run_ctx *ctx)
+{
+	int i;
+
+	for (i = 0; i < ctx->count; i++) {
+		if (!ctx->u.uctx_list[i])
+			continue;
+		ibv_close_device(ctx->u.uctx_list[i]);
+	}
 }
 
 static void free_pds(struct run_ctx *ctx)
@@ -481,6 +515,8 @@ static void free_resources(struct run_ctx *ctx)
 		return;
 
 	switch (err) {
+	case RTYPE_UCTX:
+		free_uctx(ctx);
 	case RTYPE_PD:
 		free_pds(ctx);
 		break;
@@ -545,6 +581,7 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	ctx->access_flags = IBV_ACCESS_LOCAL_WRITE;
 	if (ctx->odp)
 		ctx->access_flags |= IBV_ACCESS_ON_DEMAND;
+	ctx->device = ib_dev;
 	printf("Configuration\n");
 	printf("size = ");
 	print_size(ctx->size);

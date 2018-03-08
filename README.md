@@ -1,7 +1,7 @@
 rdma_resource_lat
 ===========
 
-An tool to monitor RDMA PD, MR registration latency in real time.
+An tool to monitor RDMA PD, MR, ucontext registration latency in real time.
 
 Homepage: https://github.com/paravpandit/rtool/
 
