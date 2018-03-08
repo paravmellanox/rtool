@@ -48,8 +48,12 @@
 struct run_ctx {
 	struct ibv_context *context;
 	struct ibv_pd *pd;
-	struct ibv_mr **mr_list;
-	char *ibdev_name;
+
+	union {
+		struct ibv_mr **mr_list;
+		struct ibv_pd **pd_list;
+	} u;
+
 	uint64_t size;
 	uint64_t page_size;
 	uint64_t align;
@@ -65,6 +69,8 @@ struct run_ctx {
 	int write_pattern;
 	int drop_ipc_lock_cap;
 	char pattern;
+	char *ibdev_name;
+	char *resource_type;
 };
 
 #define HUGE_PAGE_KPATH "/proc/sys/vm/nr_hugepages"
@@ -83,6 +89,7 @@ static void usage(const char *argv0)
 	printf("  -o --odp                 use ODP registration\n");
 	printf("  -L --lock                lock memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
+	printf("  -R --resource            resource type (pd, mr)\n");
 	printf("  -h                       display this help message\n");
 	printf("  -v                       display program version\n");
 }
@@ -92,9 +99,8 @@ void version(const char *argv0)
 	printf("%s %s\n", argv0, VERSION);
 }
 
-void parse_options(struct run_ctx *ctx, int argc, char **argv)
+static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 {
-	int opt;
 	static struct option long_options[] = {
 		{ .name = "ib-dev",   .has_arg = 1, .val = 'd' },
 		{ .name = "size",     .has_arg = 1, .val = 's' },
@@ -102,19 +108,21 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "pattern",  .has_arg = 1, .val = 'p' },
 		{ .name = "rlimit",   .has_arg = 1, .val = 'r' },
 		{ .name = "count",    .has_arg = 1, .val = 'c' },
+		{ .name = "resource", .has_arg = 1, .val = 'R' },
 		{ .name = "huge",     .has_arg = 0, .val = 'u' },
 		{ .name = "odp",      .has_arg = 0, .val = 'o' },
 		{ .name = "lock",     .has_arg = 0, .val = 'L' },
 		{ .name = "drop_ipc", .has_arg = 0, .val = 'D' },
 		{ .name = NULL }
 	};
+	int opt;
 
 	if (argc < 2) {
 		usage(argv[0]);
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:p:r:s:c:l:uoLD", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:c:l:uoLD", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -123,7 +131,20 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			usage(argv[0]);
 			exit(0);
 		case 'd':
-			ctx->ibdev_name = strdupa(optarg);
+			ctx->ibdev_name = malloc(strlen(optarg));
+			if (!ctx->ibdev_name) {
+				fprintf(stderr, "Couldn't allocate mem.\n");
+				exit(1);
+			}
+			strcpy(ctx->ibdev_name, optarg);
+			break;
+		case 'R':
+			ctx->resource_type = malloc(strlen(optarg));
+			if (!ctx->resource_type) {
+				fprintf(stderr, "Couldn't allocate mem.\n");
+				exit(1);
+			}
+			strcpy(ctx->resource_type, optarg);
 			break;
 		case 's':
 			ctx->size = parse_size(optarg);
@@ -335,24 +356,73 @@ static int setup_ipc_lock_cap(struct run_ctx *ctx)
 
 static int alloc_resource_holder(struct run_ctx *ctx)
 {
-	ctx->mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
-	if (!ctx->mr_list) {
+	ctx->u.mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
+	if (!ctx->u.mr_list) {
 		fprintf(stderr, "Couldn't allocate mr list memory\n");
 		return -ENOMEM;
 	}
 	return 0;
 }
 
-static int allocate_resources(struct run_ctx *ctx)
+enum resource_id {
+	RTYPE_PD,
+	RTYPE_MR,
+	RTYPE_MAX
+};
+
+struct resource_info {
+	enum resource_id id;
+	const char *name;
+};
+
+static const struct resource_info resource_types[] = {
+	{ RTYPE_PD, "pd", },
+	{ RTYPE_MR, "mr", },
+	{ -1, NULL, },
+};
+
+static int check_resource_type(char *type)
+{
+	int err = -EINVAL;
+	int i = 0;
+
+	while (resource_types[i].name) {
+		if (strcmp(type, resource_types[i].name)) {
+			i++;
+			continue;
+		}
+		err = resource_types[i].id;
+		break;
+	}
+	return err;
+}
+
+static int allocate_pds(struct run_ctx *ctx)
+{
+	int err = 0;
+
+	int i;
+	for (i = 0; i < ctx->count; i++) {
+		ctx->u.pd_list[i] = ibv_alloc_pd(ctx->context);
+		if (!ctx->u.pd_list[i]) {
+			fprintf(stderr, "alloc pd count = %d\n", i + 1);
+			err = -ENOMEM;
+			break;
+		}
+	}
+	return err;
+}
+
+static int allocate_mrs(struct run_ctx *ctx)
 {
 	int err = 0;
 	int i;
 
 	for (i = 0; i < ctx->count; i++) {
-		ctx->mr_list[i] =
+		ctx->u.mr_list[i] =
 				ibv_reg_mr(ctx->pd, ctx->buf,
 					   ctx->size, ctx->access_flags);
-		if (!ctx->mr_list[i]) {
+		if (!ctx->u.mr_list[i]) {
 			fprintf(stderr, "Registered MR count = %d\n", i + 1);
 			err = -ENOMEM;
 			break;
@@ -361,12 +431,62 @@ static int allocate_resources(struct run_ctx *ctx)
 	return err;
 }
 
-static void free_resources(struct run_ctx *ctx)
+static int allocate_resources(struct run_ctx *ctx)
+{
+	int err;
+
+	err = check_resource_type(ctx->resource_type);
+	if (err < 0)
+		return err;
+
+	switch (err) {
+	case RTYPE_PD:
+		err = allocate_pds(ctx);
+		break;
+	case RTYPE_MR:
+		err = allocate_mrs(ctx);
+		break;
+	}
+	return err;
+}
+
+static void free_pds(struct run_ctx *ctx)
 {
 	int i;
 
 	for (i = 0; i < ctx->count; i++) {
-		ibv_dereg_mr(ctx->mr_list[i]);
+		if (!ctx->u.pd_list[i])
+			continue;
+		ibv_dealloc_pd(ctx->u.pd_list[i]);
+	}
+}
+
+static void free_mrs(struct run_ctx *ctx)
+{
+	int i;
+
+	for (i = 0; i < ctx->count; i++) {
+		if (!ctx->u.mr_list[i])
+			continue;
+		ibv_dereg_mr(ctx->u.mr_list[i]);
+	}
+}
+
+static void free_resources(struct run_ctx *ctx)
+{
+	int err;
+
+	err = check_resource_type(ctx->resource_type);
+	if (err)
+		return;
+
+	switch (err) {
+	case RTYPE_PD:
+		free_pds(ctx);
+		break;
+	case RTYPE_MR:
+		free_mrs(ctx);
+		break;
 	}
 }
 
@@ -459,7 +579,6 @@ int main(int argc, char **argv)
 	struct run_ctx *ctx;
 	long long time_now;
 	int err;
-	int i;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
 
@@ -480,6 +599,9 @@ int main(int argc, char **argv)
 	ctx->count = 1;
 
 	parse_options(ctx, argc, argv);
+
+	if (!ctx->resource_type)
+		ctx->resource_type = "mr";
 
 	if (!ctx->ibdev_name) {
 		ib_dev = *dev_list;
@@ -512,7 +634,7 @@ int main(int argc, char **argv)
 	err = allocate_resources(ctx);
 	if (err) {
 		fprintf(stderr, "Couldn't register MR\n");
-		goto mr_cleanup;
+		goto cleanup;
 	}
 
 	time_now = current_time();
@@ -535,12 +657,8 @@ int main(int argc, char **argv)
 	ibv_free_device_list(dev_list);
 	return 0;
 
-mr_cleanup:
-	for (i = 0;  i < ctx->count; i++) {
-		if (!ctx->mr_list[i])
-			continue;
-		ibv_dereg_mr(ctx->mr_list[i]);
-	}
+cleanup:
+	free_resources(ctx);
 err:
 	cleanup_test(ctx);
 	ibv_free_device_list(dev_list);
