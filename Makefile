@@ -5,22 +5,22 @@ PREFIX=/usr/local
 BINDIR=$(PREFIX)/bin
 MAN1DIR=$(PREFIX)/share/man/man1
 
-MR_LAT_SRCS=rdma_mr_lat.c options.c
+MR_LAT_SRCS=rdma_resource_lat.c options.c
 MR_LAT_OBJS=$(MR_LAT_SRCS:.c=.o)
-MR_LAT_BINARY=rdma_mr_lat
+MR_LAT_BINARY=rdma_resource_lat
 RDMA_IO_SRCS=rdmaio.c options.c
 RDMA_IO_OBJS=$(RDMA_IO_SRCS:.c=.o)
 RDMA_IO_BINARY=rdmaio
 
-MANS=rdma_mr_lat.1 rdmaio.1
+MANS=rdma_resource_lat.1 rdmaio.1
 MANS_F=$(MANS:.1=.txt) $(MANS:.1=.pdf)
 DOCS=README.md LICENSE changelog
-SPEC=rdma_mr_lat.spec rdmaio.spec
+SPEC=rdma_resource_lat.spec rdmaio.spec
 
-PACKAGE=rdma_mr_lat
+PACKAGE=rdma_resource_lat
 GIT_VER:=$(shell test -d .git && git describe --tags --match 'v[0-9]*' \
 		--abbrev=0 | sed 's/v//')
-SRC_VER:=$(shell sed -ne 's/\#define VERSION \"\(.*\)\"/\1/p' rdma_mr_lat.c)
+SRC_VER:=$(shell sed -ne 's/\#define VERSION \"\(.*\)\"/\1/p' rdma_resource_lat.c)
 VERSION:=$(SRC_VER)
 DISTDIR=$(PACKAGE)-$(VERSION)
 DISTFILES=$(MR_LAT_SRCS) $(MANS) $(DOCS) $(SPEC) Makefile
@@ -42,7 +42,7 @@ checkver:
 	fi
 
 clean:
-	$(RM) -f $(MR_LAT_OBJS) $(MR_LAT_BINARY) $(MANS_F) rdma_mr_lat.tmp
+	$(RM) -f $(MR_LAT_OBJS) $(MR_LAT_BINARY) $(MANS_F) rdma_resource_lat.tmp
 	$(RM) -f $(RDMA_IO_OBJS) $(RDMA_IO_BINARY) $(MANS_F) rdmaio_lat.tmp
 
 strip: $(MR_LAT_BINARY) $(RDMA_IO_BINARY)

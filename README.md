@@ -1,7 +1,7 @@
-rdma_mr_lat
+rdma_resource_lat
 ===========
 
-An tool to monitor RDMA MR registration latency in real time.
+An tool to monitor RDMA PD, MR registration latency in real time.
 
 Homepage: https://github.com/paravpandit/rtool/
 
@@ -24,15 +24,23 @@ Examples
 Show RDMA MR registration latency
 
 ```
-$ rdma_mr_lat -d mlx5_0 -s 4G
+$ rdma_resource_lat -d mlx5_0 -s 4G
 ```
 
 Show RDMA MR registration latency using huge pages
 
 ```
-$ rdma_mr_lat -d mlx5_0 -s 1G -u
+$ rdma_resource_lat -d mlx5_0 -s 1G -u
 
 ```
+
+Show RDMA PD registration latency
+
+```
+$ rdma_resource_lat -d mlx5_0 -R pd
+
+```
+
 
 Authors
 -------

@@ -1,21 +1,21 @@
-.TH RDMA_MR_LAT "1" "Aug 2017" "" "User Commands"
+.TH RDMA_RESOURCE_LAT "1" "Aug 2017" "" "User Commands"
 .SH NAME
-rdma_mr_lat \- simple RDMA Memory registration latency monitoring tool
+rdma_resource_lat \- simple RDMA resource registration latency monitoring tool
 .SH SYNOPSYS
-.SY rdma_mr_lat
+.SY rdma_resource_lat
 .OP \-d device
 .OP \-s size
 .OP \-l align
 .OP \-u huge
 .br
-.SY rdma_mr_lat
+.SY rdma_resource_lat
 .B -h
 |
 .B -v
 .br
 .SH DESCRIPTION
-This tool allocates and registers memory with RDMA devices and measures
-latency in real time.
+This tool allocates and registers RDMA resource such as protection domain, or
+memory regions with RDMA devices and measures latency in real time.
 .SH OPTIONS
 .TP
 .BI \-l \ align
@@ -70,15 +70,15 @@ Invalid usage (error in command arguments).
 Error during runtime.
 .SH EXAMPLES
 .TP
-.B rdma_mr_lat -d mlx5_0
+.B rdma_resource_lat -d mlx5_0
 Show RDMA memory registration latency using default size 4k for device mlx5_0.
 .TP
-.B rdma_mr_lat -d mlx5_0 -s 4G -u
+.B rdma_resource_lat -d mlx5_0 -s 4G -u
 Show RDMA memory registration latency using default size 4k for device mlx5_0.
 It perform 4G bytes memory registration with huge pages.
 .TP
 .SH HOMEPAGE
-.UR https://github.com/paravmellanox/rdma_mr_lat/
+.UR https://github.com/paravmellanox/rtool/
 .UE .
 .SH AUTHORS
 This program was written by Parav Pandit
