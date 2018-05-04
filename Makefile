@@ -5,7 +5,7 @@ PREFIX=/usr/local
 BINDIR=$(PREFIX)/bin
 MAN1DIR=$(PREFIX)/share/man/man1
 
-MR_LAT_SRCS=rdma_resource_lat.c options.c
+MR_LAT_SRCS=resource_lat.c options.c
 MR_LAT_OBJS=$(MR_LAT_SRCS:.c=.o)
 MR_LAT_BINARY=rdma_resource_lat
 RDMA_IO_SRCS=rdmaio.c options.c
@@ -20,7 +20,7 @@ SPEC=rdma_resource_lat.spec rdmaio.spec
 PACKAGE=rdma_resource_lat
 GIT_VER:=$(shell test -d .git && git describe --tags --match 'v[0-9]*' \
 		--abbrev=0 | sed 's/v//')
-SRC_VER:=$(shell sed -ne 's/\#define VERSION \"\(.*\)\"/\1/p' rdma_resource_lat.c)
+SRC_VER:=$(shell sed -ne 's/\#define VERSION \"\(.*\)\"/\1/p' resource_lat.c)
 VERSION:=$(SRC_VER)
 DISTDIR=$(PACKAGE)-$(VERSION)
 DISTFILES=$(MR_LAT_SRCS) $(MANS) $(DOCS) $(SPEC) Makefile
