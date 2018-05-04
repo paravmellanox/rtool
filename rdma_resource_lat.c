@@ -511,7 +511,7 @@ static void free_resources(struct run_ctx *ctx)
 	int err;
 
 	err = check_resource_type(ctx->resource_type);
-	if (err)
+	if (err < 0)
 		return;
 
 	switch (err) {
