@@ -54,6 +54,7 @@ struct run_ctx {
 		struct ibv_mr **mr_list;
 		struct ibv_pd **pd_list;
 		struct ibv_context **uctx_list;
+		struct ibv_mw **mw_list;
 	} u;
 
 	uint64_t size;
@@ -91,7 +92,7 @@ static void usage(const char *argv0)
 	printf("  -o --odp                 use ODP registration\n");
 	printf("  -L --lock                lock memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
-	printf("  -R --resource            resource type (pd, mr, uctx)\n");
+	printf("  -R --resource            resource type (pd, mr, uctx, mw)\n");
 	printf("  -h                       display this help message\n");
 	printf("  -v                       display program version\n");
 }
@@ -360,7 +361,7 @@ static int alloc_resource_holder(struct run_ctx *ctx)
 {
 	ctx->u.mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
 	if (!ctx->u.mr_list) {
-		fprintf(stderr, "Couldn't allocate mr list memory\n");
+		fprintf(stderr, "Couldn't allocate list memory\n");
 		return -ENOMEM;
 	}
 	return 0;
@@ -370,6 +371,7 @@ enum resource_id {
 	RTYPE_PD,
 	RTYPE_MR,
 	RTYPE_UCTX,
+	RTYPE_MW,
 	RTYPE_MAX
 };
 
@@ -382,6 +384,7 @@ static const struct resource_info resource_types[] = {
 	{ RTYPE_PD, "pd", },
 	{ RTYPE_MR, "mr", },
 	{ RTYPE_UCTX, "uctx", },
+	{ RTYPE_MW, "mw", },
 	{ -1, NULL, },
 };
 
@@ -451,6 +454,22 @@ static int allocate_mrs(struct run_ctx *ctx)
 	return err;
 }
 
+static int allocate_mws(struct run_ctx *ctx)
+{
+	int err = 0;
+	int i;
+
+	for (i = 0; i < ctx->count; i++) {
+		ctx->u.mw_list[i] = ibv_alloc_mw(ctx->pd, IBV_MW_TYPE_2);
+		if (!ctx->u.mw_list[i]) {
+			fprintf(stderr, "Registered MW count = %d\n", i + 1);
+			err = -ENOMEM;
+			break;
+		}
+	}
+	return err;
+}
+
 static int allocate_resources(struct run_ctx *ctx)
 {
 	int err;
@@ -468,6 +487,9 @@ static int allocate_resources(struct run_ctx *ctx)
 		break;
 	case RTYPE_MR:
 		err = allocate_mrs(ctx);
+		break;
+	case RTYPE_MW:
+		err = allocate_mws(ctx);
 		break;
 	}
 	return err;
@@ -506,6 +528,17 @@ static void free_mrs(struct run_ctx *ctx)
 	}
 }
 
+static void free_mws(struct run_ctx *ctx)
+{
+	int i;
+
+	for (i = 0; i < ctx->count; i++) {
+		if (!ctx->u.mw_list[i])
+			continue;
+		ibv_dealloc_mw(ctx->u.mw_list[i]);
+	}
+}
+
 static void free_resources(struct run_ctx *ctx)
 {
 	int err;
@@ -522,6 +555,9 @@ static void free_resources(struct run_ctx *ctx)
 		break;
 	case RTYPE_MR:
 		free_mrs(ctx);
+		break;
+	case RTYPE_MW:
+		free_mws(ctx);
 		break;
 	}
 }
