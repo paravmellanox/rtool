@@ -59,17 +59,22 @@ struct run_ctx {
 	} u;
 
 	uint64_t size;
+	uint64_t mr_size;	/* mr_size and size are same if all MR
+				 * register the same pages.
+				 * Otherwise size = num_mrs * mr_size.
+				 */
 	uint64_t page_size;
 	uint64_t align;
 	uint64_t rlimit;
 	uint64_t rlimit_set;
-	void *buf;
+	uint8_t *buf;
 	int access_flags;
 
 	int huge;
 	int mmap;
 	int odp;
 	int lock_memory;
+	int dedicated_pages;	/* Each MR gets dedicated pages */
 	int read_fault;
 	int count;
 	int write_pattern;
@@ -79,6 +84,9 @@ struct run_ctx {
 	char pattern;
 	char *ibdev_name;
 	char *resource_type;
+	uint64_t step_size;	/* every new MR will be at this
+				 * step_size from base address.
+				 */
 };
 
 #define HUGE_PAGE_KPATH "/proc/sys/vm/nr_hugepages"
@@ -95,6 +103,7 @@ static void usage(const char *argv0)
 	printf("  -r --rlimit=<bytes>      memory resource hard limit in bytes\n");
 	printf("  -u --huge                use huge pages\n");
 	printf("  -o --odp                 use ODP registration\n");
+	printf("  -a --assign              use dedicated pages for each MR\n");
 	printf("  -m --mmap                use mmap for allocation for huge pages\n");
 	printf("  -L --lock                lock memory before registration\n");
 	printf("  -f --fault               read page fault memory before registration\n");
@@ -123,6 +132,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "resource", .has_arg = 1, .val = 'R' },
 		{ .name = "huge",     .has_arg = 0, .val = 'u' },
 		{ .name = "odp",      .has_arg = 0, .val = 'o' },
+		{ .name = "assign",   .has_arg = 0, .val = 'a' },
 		{ .name = "lock",     .has_arg = 0, .val = 'L' },
 		{ .name = "fault",    .has_arg = 0, .val = 'f' },
 		{ .name = "drop_ipc", .has_arg = 0, .val = 'D' },
@@ -138,7 +148,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:c:l:uoLfDSWm", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:c:l:uoLfDSWma", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -146,6 +156,9 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		case 'h':
 			usage(argv[0]);
 			exit(0);
+		case 'a':
+			ctx->dedicated_pages = 1;
+			break;
 		case 'd':
 			ctx->ibdev_name = malloc(strlen(optarg));
 			if (!ctx->ibdev_name) {
@@ -204,6 +217,17 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			ctx->wait = 1;
 			break;
 		}
+	}
+}
+
+static void normalize_options(struct run_ctx *ctx)
+{
+	ctx->mr_size = ctx->size;
+	if (ctx->dedicated_pages) {
+		ctx->step_size = ctx->size;
+		ctx->size = ctx->size * ctx->count;
+	} else {
+		ctx->step_size = 0;
 	}
 }
 
@@ -504,8 +528,8 @@ static int allocate_mrs(struct run_ctx *ctx)
 
 	for (i = 0; i < ctx->count; i++) {
 		ctx->u.mr_list[i] =
-				ibv_reg_mr(ctx->pd, ctx->buf,
-					   ctx->size, ctx->access_flags);
+				ibv_reg_mr(ctx->pd, ctx->buf + (i * ctx->step_size),
+					   ctx->mr_size, ctx->access_flags);
 		if (!ctx->u.mr_list[i]) {
 			fprintf(stderr, "Registered MR count = %d\n", i + 1);
 			err = -ENOMEM;
@@ -693,6 +717,7 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	printf("\n");
 	printf("hugetlb = %s\n", ctx->huge ? "enabled" : "disabled");
 	printf("odp = %s\n", ctx->odp ? "enabled" : "disabled");
+	printf("mmap= %s\n", ctx->mmap ? "enabled" : "disabled");
 err:
 	return err;
 }
@@ -751,6 +776,7 @@ int main(int argc, char **argv)
 	ctx->count = 1;
 
 	parse_options(ctx, argc, argv);
+	normalize_options(ctx);
 
 	if (!ctx->resource_type)
 		ctx->resource_type = "mr";
