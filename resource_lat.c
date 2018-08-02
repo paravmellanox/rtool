@@ -67,6 +67,7 @@ struct run_ctx {
 	int access_flags;
 
 	int huge;
+	int mmap;
 	int odp;
 	int lock_memory;
 	int read_fault;
@@ -94,6 +95,7 @@ static void usage(const char *argv0)
 	printf("  -r --rlimit=<bytes>      memory resource hard limit in bytes\n");
 	printf("  -u --huge                use huge pages\n");
 	printf("  -o --odp                 use ODP registration\n");
+	printf("  -m --mmap                use mmap for allocation for huge pages\n");
 	printf("  -L --lock                lock memory before registration\n");
 	printf("  -f --fault               read page fault memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
@@ -126,6 +128,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "drop_ipc", .has_arg = 0, .val = 'D' },
 		{ .name = "segfault", .has_arg = 0, .val = 'S' },
 		{ .name = "wait",     .has_arg = 0, .val = 'W' },
+		{ .name = "mmap",     .has_arg = 0, .val = 'm' },
 		{ .name = NULL }
 	};
 	int opt;
@@ -135,7 +138,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:c:l:uoLfDSW", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:c:l:uoLfDSWm", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -164,6 +167,9 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'l':
 			ctx->align = parse_size(optarg);
+			break;
+		case 'm':
+			ctx->mmap = 1;
 			break;
 		case 'c':
 			ctx->count = parse_size(optarg);
@@ -260,6 +266,28 @@ static int config_hugetlb_kernel(struct run_ctx *ctx)
 	return config_hugetlb_pages(num_hpages);
 }
 
+static int alloc_hugepage_mem(struct run_ctx *ctx)
+{
+	int mmap_flags = MAP_ANONYMOUS | MAP_PRIVATE;
+
+	if (ctx->mmap) {
+		mmap_flags |= MAP_HUGETLB;
+		ctx->buf = mmap(0, ctx->size, PROT_WRITE | PROT_READ,
+				mmap_flags, 0, 0);
+		if (ctx->buf == MAP_FAILED) {
+			perror("mmap");
+			return -ENOMEM;
+		}
+	} else {
+		ctx->buf = get_hugepage_region(ctx->size, GHR_STRICT | GHR_COLOR);
+		if (!ctx->buf) {
+			perror("mmap");
+			return -ENOMEM;
+		}
+	}
+	return 0;
+}
+
 static int alloc_mem(struct run_ctx *ctx)
 {
 	int err = 0;
@@ -271,12 +299,9 @@ static int alloc_mem(struct run_ctx *ctx)
 			err = -EINVAL;
 			return err;
 		}
-		ctx->buf = get_hugepage_region(ctx->size, GHR_STRICT | GHR_COLOR);
-		if (!ctx->buf) {
-			perror("mmap");
-			err = -ENOMEM;
+		err = alloc_hugepage_mem(ctx);
+		if (err)
 			return err;
-		}
 	} else {
 		ctx->buf = memalign(ctx->align, ctx->size);
 		if (!ctx->buf) {
