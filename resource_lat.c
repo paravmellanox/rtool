@@ -46,17 +46,32 @@
 
 #include "options.h"
 
-struct run_ctx {
-	struct ibv_device *device;
-	struct ibv_context *context;
-	struct ibv_pd *pd;
+struct statistics {
+	long long start, finish, load_time;
+};
 
+struct time_stats {
+	long long min, max, avg;
+	long long count;
+};
+
+struct thread_ctx {
 	union {
 		struct ibv_mr **mr_list;
 		struct ibv_pd **pd_list;
 		struct ibv_context **uctx_list;
 		struct ibv_mw **mw_list;
 	} u;
+	struct time_stats alloc_stats;
+	struct time_stats free_stats;
+};
+
+struct run_ctx {
+	struct ibv_device *device;
+	struct ibv_context *context;
+	struct ibv_pd *pd;
+
+	struct thread_ctx t_ctx;
 
 	uint64_t size;
 	uint64_t mr_size;	/* mr_size and size are same if all MR
@@ -231,24 +246,17 @@ static void normalize_options(struct run_ctx *ctx)
 	}
 }
 
-struct statistics {
-	long long start, finish, load_time;
-	long long min, max;
-};
-
-static void start_statistics(struct statistics *s, unsigned long long start)
+static void start_statistics(struct statistics *s)
 {
 	memset(s, 0, sizeof(*s));
-	s->min = LLONG_MAX;
-	s->max = LLONG_MIN;
-	s->start = start;
+	s->start = current_time();
 }
 
-static void finish_statistics(struct statistics *s,
-			      unsigned long long finish)
+static void finish_statistics(struct statistics *s)
 {
-	s->finish = finish;
-	s->load_time = finish - s->start;
+	s->finish = current_time();
+	s->load_time = s->finish - s->start;
+	//print_time(s->load_time); printf("\n");
 }
 
 static int config_hugetlb_pages(uint64_t num_hpages)
@@ -442,10 +450,10 @@ static int setup_ipc_lock_cap(struct run_ctx *ctx)
 	return ret;
 }
 
-static int alloc_resource_holder(struct run_ctx *ctx)
+static int alloc_resource_holder(struct run_ctx *ctx, struct thread_ctx *t)
 {
-	ctx->u.mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
-	if (!ctx->u.mr_list) {
+	t->u.mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
+	if (!t->u.mr_list) {
 		fprintf(stderr, "Couldn't allocate list memory\n");
 		return -ENOMEM;
 	}
@@ -489,167 +497,176 @@ static int check_resource_type(char *type)
 	return err;
 }
 
-static int allocate_uctx(struct run_ctx *ctx)
+static void update_min(const struct statistics *stat, struct time_stats *t)
+{
+	if (stat->load_time < t->min)
+		t->min = stat->load_time;
+}
+
+static void update_max(const struct statistics *stat, struct time_stats *t)
+{
+	if (stat->load_time > t->max)
+		t->max = stat->load_time;
+}
+
+static void update_avg(const struct statistics *stat,
+			   struct time_stats *t)
+{
+	long long avg = t->avg;
+	long long old_sum = avg * t->count;
+	long long new_avg = (old_sum + stat->load_time) / (t->count + 1);
+
+	t->avg = new_avg;
+}
+
+static int alloc_uctx(struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
 	int err = 0;
 
-	int i;
-	for (i = 0; i < ctx->count; i++) {
-		ctx->u.uctx_list[i] = ibv_open_device(ctx->device);
-		if (!ctx->u.uctx_list[i]) {
-			fprintf(stderr, "alloc pd count = %d\n", i + 1);
-			err = -ENOMEM;
-			break;
-		}
+	t->u.uctx_list[i] = ibv_open_device(ctx->device);
+	if (!t->u.uctx_list[i]) {
+		fprintf(stderr, "alloc pd count = %d\n", i);
+		err = -ENOMEM;
 	}
 	return err;
 }
 
-static int allocate_pds(struct run_ctx *ctx)
+static int alloc_pd(struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
 	int err = 0;
 
-	int i;
-	for (i = 0; i < ctx->count; i++) {
-		ctx->u.pd_list[i] = ibv_alloc_pd(ctx->context);
-		if (!ctx->u.pd_list[i]) {
-			fprintf(stderr, "alloc pd count = %d\n", i + 1);
-			err = -ENOMEM;
-			break;
-		}
+	t->u.pd_list[i] = ibv_alloc_pd(ctx->context);
+	if (!t->u.pd_list[i]) {
+		fprintf(stderr, "alloc pd count = %d\n", i);
+		err = -ENOMEM;
 	}
 	return err;
 }
 
-static int allocate_mrs(struct run_ctx *ctx)
+static int alloc_mr(struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
 	int err = 0;
-	int i;
 
-	for (i = 0; i < ctx->count; i++) {
-		ctx->u.mr_list[i] =
-				ibv_reg_mr(ctx->pd, ctx->buf + (i * ctx->step_size),
-					   ctx->mr_size, ctx->access_flags);
-		if (!ctx->u.mr_list[i]) {
-			fprintf(stderr, "Registered MR count = %d\n", i + 1);
-			err = -ENOMEM;
-			break;
-		}
+	t->u.mr_list[i] =
+			ibv_reg_mr(ctx->pd, ctx->buf + (i * ctx->step_size),
+				   ctx->mr_size, ctx->access_flags);
+	if (!t->u.mr_list[i]) {
+		fprintf(stderr, "Registered MR count = %d\n", i);
+		err = -ENOMEM;
 	}
 	return err;
 }
 
-static int allocate_mws(struct run_ctx *ctx)
+static int alloc_mw(struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
 	int err = 0;
-	int i;
 
-	for (i = 0; i < ctx->count; i++) {
-		ctx->u.mw_list[i] = ibv_alloc_mw(ctx->pd, IBV_MW_TYPE_2);
-		if (!ctx->u.mw_list[i]) {
-			fprintf(stderr, "Registered MW count = %d\n", i + 1);
-			err = -ENOMEM;
-			break;
-		}
+	t->u.mw_list[i] = ibv_alloc_mw(ctx->pd, IBV_MW_TYPE_2);
+	if (!t->u.mw_list[i]) {
+		fprintf(stderr, "Registered MW count = %d\n", i);
+		err = -ENOMEM;
 	}
 	return err;
 }
 
 static int allocate_resources(struct run_ctx *ctx)
 {
-	int err;
+	struct statistics stat;
+	int err = 0;
+	int type;
+	int i;
 
-	err = check_resource_type(ctx->resource_type);
-	if (err < 0)
+	type = check_resource_type(ctx->resource_type);
+	if (type < 0)
 		return err;
 
-	switch (err) {
-	case RTYPE_UCTX:
-		err = allocate_uctx(ctx);
-		break;
-	case RTYPE_PD:
-		err = allocate_pds(ctx);
-		break;
-	case RTYPE_MR:
-		err = allocate_mrs(ctx);
-		break;
-	case RTYPE_MW:
-		err = allocate_mws(ctx);
-		break;
+	for (i = 0; i < ctx->count; i++) {
+		start_statistics(&stat);
+		switch (type) {
+		case RTYPE_UCTX:
+			err = alloc_uctx(ctx, &ctx->t_ctx, i);
+			break;
+		case RTYPE_PD:
+			err = alloc_pd(ctx, &ctx->t_ctx, i);
+			break;
+		case RTYPE_MR:
+			err = alloc_mr(ctx, &ctx->t_ctx, i);
+			break;
+		case RTYPE_MW:
+			err = alloc_mw(ctx, &ctx->t_ctx, i);
+			break;
+		}
+		finish_statistics(&stat);
+		if (err)
+			break;
+		update_min(&stat, &ctx->t_ctx.alloc_stats);
+		update_max(&stat, &ctx->t_ctx.alloc_stats);
+		update_avg(&stat, &ctx->t_ctx.alloc_stats);
+		ctx->t_ctx.alloc_stats.count++;
 	}
 	return err;
 }
 
-static void free_uctx(struct run_ctx *ctx)
+static void free_uctx(struct thread_ctx *t, int i)
 {
-	int i;
-
-	for (i = 0; i < ctx->count; i++) {
-		if (!ctx->u.uctx_list[i])
-			continue;
-		ibv_close_device(ctx->u.uctx_list[i]);
-	}
+	if (t->u.uctx_list[i])
+		ibv_close_device(t->u.uctx_list[i]);
 }
 
-static void free_pds(struct run_ctx *ctx)
+static void free_pd(struct thread_ctx *t, int i)
 {
-	int i;
-
-	for (i = 0; i < ctx->count; i++) {
-		if (!ctx->u.pd_list[i])
-			continue;
-		ibv_dealloc_pd(ctx->u.pd_list[i]);
-	}
+	if (t->u.pd_list[i])
+		ibv_dealloc_pd(t->u.pd_list[i]);
 }
 
-static void free_mrs(struct run_ctx *ctx)
+static void free_mr(struct thread_ctx *t, int i)
 {
-	int i;
-
-	for (i = 0; i < ctx->count; i++) {
-		if (!ctx->u.mr_list[i])
-			continue;
-		ibv_dereg_mr(ctx->u.mr_list[i]);
-	}
+	if (t->u.mr_list[i])
+		ibv_dereg_mr(t->u.mr_list[i]);
 }
 
-static void free_mws(struct run_ctx *ctx)
+static void free_mw(struct thread_ctx *t, int i)
 {
-	int i;
-
-	for (i = 0; i < ctx->count; i++) {
-		if (!ctx->u.mw_list[i])
-			continue;
-		ibv_dealloc_mw(ctx->u.mw_list[i]);
-	}
+	if (t->u.mw_list[i])
+		ibv_dealloc_mw(t->u.mw_list[i]);
 }
 
 static void free_resources(struct run_ctx *ctx)
 {
+	struct statistics stat;
 	int err;
+	int i;
 
 	err = check_resource_type(ctx->resource_type);
 	if (err < 0)
 		return;
 
-	switch (err) {
-	case RTYPE_UCTX:
-		free_uctx(ctx);
-	case RTYPE_PD:
-		free_pds(ctx);
-		break;
-	case RTYPE_MR:
-		free_mrs(ctx);
-		break;
-	case RTYPE_MW:
-		free_mws(ctx);
-		break;
+	for (i = 0; i < ctx->count; i++) {
+		start_statistics(&stat);
+		switch (err) {
+		case RTYPE_UCTX:
+			free_uctx(&ctx->t_ctx, i);
+		case RTYPE_PD:
+			free_pd(&ctx->t_ctx, i);
+			break;
+		case RTYPE_MR:
+			free_mr(&ctx->t_ctx, i);
+			break;
+		case RTYPE_MW:
+			free_mw(&ctx->t_ctx, i);
+			break;
+		}
+		finish_statistics(&stat);
+		update_min(&stat, &ctx->t_ctx.free_stats);
+		update_max(&stat, &ctx->t_ctx.free_stats);
+		update_avg(&stat, &ctx->t_ctx.free_stats);
+		ctx->t_ctx.free_stats.count++;
 	}
 }
 
 static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
-	int err = 0;
+	int err;
 
 	err = set_rlimit(ctx);
 	if (err) {
@@ -662,6 +679,49 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		fprintf(stderr, "Couldn't drop ipc lock capability\n");
 		goto err;
 	}
+
+	ctx->context = ibv_open_device(ib_dev);
+	if (!ctx->context) {
+		fprintf(stderr, "Couldn't get context for %s\n",
+			ibv_get_device_name(ib_dev));
+		goto err;
+	}
+
+	ctx->pd = ibv_alloc_pd(ctx->context);
+	if (!ctx->pd) {
+		fprintf(stderr, "Couldn't allocate PD\n");
+		err = -ENOMEM;
+		goto err;
+	}
+
+	ctx->access_flags = IBV_ACCESS_LOCAL_WRITE;
+	if (ctx->odp)
+		ctx->access_flags |= IBV_ACCESS_ON_DEMAND;
+
+	ctx->device = ib_dev;
+	printf("Configuration\n");
+	printf("size = ");
+	print_size(ctx->size);
+	printf("\n");
+	printf("align = ");
+	print_size(ctx->align);
+	printf("\n");
+	printf("count = ");
+	print_int(ctx->count);
+	printf("\n");
+	printf("hugetlb = %s\n", ctx->huge ? "enabled" : "disabled");
+	printf("odp = %s\n", ctx->odp ? "enabled" : "disabled");
+	printf("mmap= %s\n", ctx->mmap ? "enabled" : "disabled");
+
+	err = alloc_resource_holder(ctx, &ctx->t_ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't allocate resource holding memory\n");
+		goto err;
+	}
+	ctx->t_ctx.alloc_stats.min = LLONG_MAX;
+	ctx->t_ctx.alloc_stats.max = LLONG_MIN;
+	ctx->t_ctx.free_stats.min = LLONG_MAX;
+	ctx->t_ctx.free_stats.max = LLONG_MIN;
 
 	err = alloc_mem(ctx);
 	if (err) {
@@ -678,48 +738,20 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 
 	read_fault(ctx);
 
-	ctx->context = ibv_open_device(ib_dev);
-	if (!ctx->context) {
-		fprintf(stderr, "Couldn't get context for %s\n",
-			ibv_get_device_name(ib_dev));
-		goto err;
-	}
-
-	ctx->pd = ibv_alloc_pd(ctx->context);
-	if (!ctx->pd) {
-		fprintf(stderr, "Couldn't allocate PD\n");
-		err = -ENOMEM;
-		goto err;
-	}
-
 	if (ctx->write_pattern) {
 		memset(ctx->buf, ctx->pattern, ctx->size);
 	}
-	err = alloc_resource_holder(ctx);
-	if (err) {
-		fprintf(stderr, "Couldn't allocate resource holding memory\n");
-		goto err;
-	}
-
-	ctx->access_flags = IBV_ACCESS_LOCAL_WRITE;
-	if (ctx->odp)
-		ctx->access_flags |= IBV_ACCESS_ON_DEMAND;
-	ctx->device = ib_dev;
-	printf("Configuration\n");
-	printf("size = ");
-	print_size(ctx->size);
-	printf("\n");
-	printf("align = ");
-	print_size(ctx->align);
-	printf("\n");
-	printf("count = ");
-	print_size(ctx->count);
-	printf("\n");
-	printf("hugetlb = %s\n", ctx->huge ? "enabled" : "disabled");
-	printf("odp = %s\n", ctx->odp ? "enabled" : "disabled");
-	printf("mmap= %s\n", ctx->mmap ? "enabled" : "disabled");
 err:
 	return err;
+}
+
+static void print_min_max_avg_stats(struct time_stats *s, char *str)
+{
+	printf("%s lat:", str);
+	printf(" min="); print_time(s->min); printf(",");
+	printf(" max="); print_time(s->max); printf(",");
+	printf(" avg="); print_time(s->avg);
+	printf("\n");
 }
 
 static void cleanup_test(struct run_ctx *ctx)
@@ -748,13 +780,56 @@ static void check_for_user_signal(struct run_ctx *ctx)
 	}
 }
 
-int main(int argc, char **argv)
+static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
 	struct statistics reg_time, dereg_time;
+	int err;
+
+	err = setup_test(ctx, ib_dev);
+	if (err)
+		goto err;
+
+	start_statistics(&reg_time);
+
+	err = allocate_resources(ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't register resources\n");
+		goto cleanup;
+	}
+	finish_statistics(&reg_time);
+
+	printf("total alloc lat = ");
+	print_time(reg_time.load_time);
+	printf("\n");
+	print_min_max_avg_stats(&ctx->t_ctx.alloc_stats, "alloc");
+
+	check_for_user_signal(ctx);
+	check_for_segfault(ctx);
+
+	start_statistics(&dereg_time);
+	free_resources(ctx);
+	finish_statistics(&dereg_time);
+
+	printf("total dealloc lat = ");
+	print_time(dereg_time.load_time);
+	printf("\n");
+	print_min_max_avg_stats(&ctx->t_ctx.free_stats, "dealloc");
+
+	cleanup_test(ctx);
+	return 0;
+
+cleanup:
+	free_resources(ctx);
+err:
+	cleanup_test(ctx);
+	return err;
+}
+
+int main(int argc, char **argv)
+{
 	struct ibv_device **dev_list;
 	struct ibv_device *ib_dev;
 	struct run_ctx *ctx;
-	long long time_now;
 	int err;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
@@ -802,47 +877,8 @@ int main(int argc, char **argv)
 		}
 	}
 
-	err = setup_test(ctx, ib_dev);
-	if (err)
-		goto err;
-
-	time_now = current_time();
-	start_statistics(&reg_time, time_now);
-
-	err = allocate_resources(ctx);
-	if (err) {
-		fprintf(stderr, "Couldn't register MR\n");
-		goto cleanup;
-	}
-
-	time_now = current_time();
-	finish_statistics(&reg_time, time_now);
-
-	check_for_user_signal(ctx);
-	check_for_segfault(ctx);
-
-	time_now = current_time();
-	start_statistics(&dereg_time, time_now);
-
-	free_resources(ctx);
-
-	time_now = current_time();
-	finish_statistics(&dereg_time, time_now);
-
-	printf("registration time = ");
-	print_time(reg_time.load_time);
-	printf("\n");
-	printf("deregistration time = ");
-	print_time(dereg_time.load_time);
-	printf("\n");
-	cleanup_test(ctx);
-	ibv_free_device_list(dev_list);
-	return 0;
-
-cleanup:
-	free_resources(ctx);
+	err = do_test(ctx, ib_dev);
 err:
-	cleanup_test(ctx);
 	ibv_free_device_list(dev_list);
 	return err;
 }
