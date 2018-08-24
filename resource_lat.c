@@ -138,7 +138,7 @@ void version(const char *argv0)
 static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 {
 	static struct option long_options[] = {
-		{ .name = "ib-dev",   .has_arg = 1, .val = 'd' },
+		{ .name = "ibdev",    .has_arg = 1, .val = 'd' },
 		{ .name = "size",     .has_arg = 1, .val = 's' },
 		{ .name = "align",    .has_arg = 1, .val = 'l' },
 		{ .name = "pattern",  .has_arg = 1, .val = 'p' },
