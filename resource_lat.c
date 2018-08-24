@@ -51,6 +51,7 @@ struct statistics {
 };
 
 struct time_stats {
+	struct statistics total;
 	long long min, max, avg;
 	long long count;
 };
@@ -77,6 +78,16 @@ struct run_ctx {
 	uint64_t mr_size;	/* mr_size and size are same if all MR
 				 * register the same pages.
 				 * Otherwise size = num_mrs * mr_size.
+				 */
+	uint64_t min_mr_size; 	/*
+				 * this is the min_mr size to test
+				 * when testing with different sizes.
+				 * starting from PAGE_SIZE to
+				 * mr_size.
+				 */
+	uint64_t max_mr_size;	/* Do MR tests from min_mr_size to
+				 * max_mr_size with doubling MR size
+				 * on each iteration.
 				 */
 	uint64_t page_size;
 	uint64_t align;
@@ -119,6 +130,7 @@ static void usage(const char *argv0)
 	printf("  -u --huge                use huge pages\n");
 	printf("  -o --odp                 use ODP registration\n");
 	printf("  -a --assign              use dedicated pages for each MR\n");
+	printf("  -A --all                 use all MR sizes starting from PAGE_SIZE to size\n");
 	printf("  -m --mmap                use mmap for allocation for huge pages\n");
 	printf("  -L --lock                lock memory before registration\n");
 	printf("  -f --fault               read page fault memory before registration\n");
@@ -148,6 +160,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "huge",     .has_arg = 0, .val = 'u' },
 		{ .name = "odp",      .has_arg = 0, .val = 'o' },
 		{ .name = "assign",   .has_arg = 0, .val = 'a' },
+		{ .name = "all",      .has_arg = 0, .val = 'A' },
 		{ .name = "lock",     .has_arg = 0, .val = 'L' },
 		{ .name = "fault",    .has_arg = 0, .val = 'f' },
 		{ .name = "drop_ipc", .has_arg = 0, .val = 'D' },
@@ -163,7 +176,8 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:c:l:uoLfDSWma", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:c:l:uoLfDSWmaA",
+				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -192,6 +206,9 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 's':
 			ctx->size = parse_size(optarg);
+			break;
+		case 'A':
+			ctx->min_mr_size = sysconf(_SC_PAGESIZE);
 			break;
 		case 'l':
 			ctx->align = parse_size(optarg);
@@ -235,14 +252,17 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 	}
 }
 
-static void normalize_options(struct run_ctx *ctx)
+static void normalize_sizes(struct run_ctx *ctx)
 {
-	ctx->mr_size = ctx->size;
-	if (ctx->dedicated_pages) {
-		ctx->step_size = ctx->size;
-		ctx->size = ctx->size * ctx->count;
-	} else {
-		ctx->step_size = 0;
+	if ((strcmp(ctx->resource_type, "mr") == 0) ||
+	    (strcmp(ctx->resource_type, "mw") == 0)) {
+		ctx->mr_size = ctx->size;
+		if (ctx->dedicated_pages) {
+			ctx->step_size = ctx->size;
+			ctx->size = ctx->size * ctx->count;
+		} else {
+			ctx->step_size = 0;
+		}
 	}
 }
 
@@ -256,7 +276,6 @@ static void finish_statistics(struct statistics *s)
 {
 	s->finish = current_time();
 	s->load_time = s->finish - s->start;
-	//print_time(s->load_time); printf("\n");
 }
 
 static int config_hugetlb_pages(uint64_t num_hpages)
@@ -699,19 +718,6 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		ctx->access_flags |= IBV_ACCESS_ON_DEMAND;
 
 	ctx->device = ib_dev;
-	printf("Configuration\n");
-	printf("size = ");
-	print_size(ctx->size);
-	printf("\n");
-	printf("align = ");
-	print_size(ctx->align);
-	printf("\n");
-	printf("count = ");
-	print_int(ctx->count);
-	printf("\n");
-	printf("hugetlb = %s\n", ctx->huge ? "enabled" : "disabled");
-	printf("odp = %s\n", ctx->odp ? "enabled" : "disabled");
-	printf("mmap= %s\n", ctx->mmap ? "enabled" : "disabled");
 
 	err = alloc_resource_holder(ctx, &ctx->t_ctx);
 	if (err) {
@@ -720,8 +726,10 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	}
 	ctx->t_ctx.alloc_stats.min = LLONG_MAX;
 	ctx->t_ctx.alloc_stats.max = LLONG_MIN;
+	ctx->t_ctx.alloc_stats.count = 0;
 	ctx->t_ctx.free_stats.min = LLONG_MAX;
 	ctx->t_ctx.free_stats.max = LLONG_MIN;
+	ctx->t_ctx.free_stats.count = 0;
 
 	err = alloc_mem(ctx);
 	if (err) {
@@ -745,12 +753,17 @@ err:
 	return err;
 }
 
-static void print_min_max_avg_stats(struct time_stats *s, char *str)
+static void print_lat_stats(uint64_t size, struct time_stats *s, char *str)
 {
+	if (size) {
+		printf("size: "); print_size(size); printf(" ");
+	}
+
 	printf("%s lat:", str);
 	printf(" min="); print_time(s->min); printf(",");
 	printf(" max="); print_time(s->max); printf(",");
-	printf(" avg="); print_time(s->avg);
+	printf(" avg="); print_time(s->avg); printf(",");
+	printf(" tot="); print_time(s->total.load_time);
 	printf("\n");
 }
 
@@ -780,40 +793,47 @@ static void check_for_user_signal(struct run_ctx *ctx)
 	}
 }
 
+static void dump_global_test_cfg(struct run_ctx *ctx)
+{
+	printf("Configuration\n");
+	printf("align = ");
+	print_size(ctx->align);
+	printf("\n");
+	printf("count = ");
+	print_int(ctx->count);
+	printf("\n");
+	printf("hugetlb = %s\n", ctx->huge ? "enabled" : "disabled");
+	printf("odp = %s\n", ctx->odp ? "enabled" : "disabled");
+	printf("mmap= %s\n", ctx->mmap ? "enabled" : "disabled");
+}
+
 static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
-	struct statistics reg_time, dereg_time;
 	int err;
 
 	err = setup_test(ctx, ib_dev);
 	if (err)
 		goto err;
 
-	start_statistics(&reg_time);
+	start_statistics(&ctx->t_ctx.alloc_stats.total);
 
 	err = allocate_resources(ctx);
 	if (err) {
 		fprintf(stderr, "Couldn't register resources\n");
 		goto cleanup;
 	}
-	finish_statistics(&reg_time);
+	finish_statistics(&ctx->t_ctx.alloc_stats.total);
 
-	printf("total alloc lat = ");
-	print_time(reg_time.load_time);
-	printf("\n");
-	print_min_max_avg_stats(&ctx->t_ctx.alloc_stats, "alloc");
+	print_lat_stats(ctx->mr_size, &ctx->t_ctx.alloc_stats, "alloc");
 
 	check_for_user_signal(ctx);
 	check_for_segfault(ctx);
 
-	start_statistics(&dereg_time);
+	start_statistics(&ctx->t_ctx.free_stats.total);
 	free_resources(ctx);
-	finish_statistics(&dereg_time);
+	finish_statistics(&ctx->t_ctx.free_stats.total);
 
-	printf("total dealloc lat = ");
-	print_time(dereg_time.load_time);
-	printf("\n");
-	print_min_max_avg_stats(&ctx->t_ctx.free_stats, "dealloc");
+	print_lat_stats(ctx->mr_size, &ctx->t_ctx.free_stats, "free");
 
 	cleanup_test(ctx);
 	return 0;
@@ -851,7 +871,10 @@ int main(int argc, char **argv)
 	ctx->count = 1;
 
 	parse_options(ctx, argc, argv);
-	normalize_options(ctx);
+
+	ctx->max_mr_size = ctx->size;
+	if (ctx->min_mr_size == 0)
+		ctx->min_mr_size = ctx->max_mr_size;
 
 	if (!ctx->resource_type)
 		ctx->resource_type = "mr";
@@ -877,7 +900,14 @@ int main(int argc, char **argv)
 		}
 	}
 
-	err = do_test(ctx, ib_dev);
+	dump_global_test_cfg(ctx);
+
+	while (ctx->min_mr_size <= ctx->max_mr_size) {
+		ctx->size = ctx->min_mr_size;
+		normalize_sizes(ctx);
+		err = do_test(ctx, ib_dev);
+		ctx->min_mr_size *= 2;
+	}
 err:
 	ibv_free_device_list(dev_list);
 	return err;
