@@ -368,10 +368,12 @@ static int alloc_mem(struct run_ctx *ctx)
 static void free_mem(struct run_ctx *ctx)
 {
 	if (ctx->huge) {
-		free_hugepage_region(ctx->buf);
+		if (ctx->buf)
+			free_hugepage_region(ctx->buf);
 		reset_huge_tlb_pages(0);
 	} else {
-		free(ctx->buf);
+		if (ctx->buf)
+			free(ctx->buf);
 	}
 }
 
