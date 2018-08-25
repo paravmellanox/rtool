@@ -46,6 +46,8 @@
 
 #include "options.h"
 
+static pthread_barrier_t run_barrier;
+
 struct statistics {
 	long long start, finish, load_time;
 };
@@ -872,6 +874,8 @@ static void* do_run(void *arg)
 	if (err)
 		goto done;
 
+	/* Wait for all threads to finish their allocation */
+	pthread_barrier_wait(&run_barrier);
 	do {
 		err = do_one_test(ctx, t_ctx);
 		if (err)
@@ -902,6 +906,7 @@ static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		err = -ENOMEM;
 		goto err;
 	}
+	pthread_barrier_init(&run_barrier, NULL, ctx->threads);
 
 	for (i = 0; i < ctx->threads; i++) {
 		threads[i].ctx = ctx;
@@ -922,11 +927,8 @@ static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		print_lat_stats(ctx->mr_size, &threads[i].t_ctx.free_stats,  "free ");
 		printf("issued:  "); print_int(ctx->iter); printf("\n");
 	}
-
-	cleanup_test(ctx);
-	return 0;
-
 err:
+	pthread_barrier_destroy(&run_barrier);
 	cleanup_test(ctx);
 	return err;
 }
