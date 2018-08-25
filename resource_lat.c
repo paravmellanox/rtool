@@ -57,6 +57,7 @@ struct time_stats {
 };
 
 struct thread_ctx {
+	uint8_t *buf;
 	union {
 		struct ibv_mr **mr_list;
 		struct ibv_pd **pd_list;
@@ -93,7 +94,6 @@ struct run_ctx {
 	uint64_t align;
 	uint64_t rlimit;
 	uint64_t rlimit_set;
-	uint8_t *buf;
 	int access_flags;
 
 	int huge;
@@ -328,15 +328,15 @@ static int alloc_hugepage_mem(struct run_ctx *ctx)
 
 	if (ctx->mmap) {
 		mmap_flags |= MAP_HUGETLB;
-		ctx->buf = mmap(0, ctx->size, PROT_WRITE | PROT_READ,
+		ctx->t_ctx.buf = mmap(0, ctx->size, PROT_WRITE | PROT_READ,
 				mmap_flags, 0, 0);
-		if (ctx->buf == MAP_FAILED) {
+		if (ctx->t_ctx.buf == MAP_FAILED) {
 			perror("mmap");
 			return -ENOMEM;
 		}
 	} else {
-		ctx->buf = get_hugepage_region(ctx->size, GHR_STRICT | GHR_COLOR);
-		if (!ctx->buf) {
+		ctx->t_ctx.buf = get_hugepage_region(ctx->size, GHR_STRICT | GHR_COLOR);
+		if (!ctx->t_ctx.buf) {
 			perror("mmap");
 			return -ENOMEM;
 		}
@@ -359,8 +359,8 @@ static int alloc_mem(struct run_ctx *ctx)
 		if (err)
 			return err;
 	} else {
-		ctx->buf = memalign(ctx->align, ctx->size);
-		if (!ctx->buf) {
+		ctx->t_ctx.buf = memalign(ctx->align, ctx->size);
+		if (!ctx->t_ctx.buf) {
 			fprintf(stderr, "Couldn't allocate work buf.\n");
 			err = -ENOMEM;
 			return err;
@@ -373,12 +373,12 @@ static int alloc_mem(struct run_ctx *ctx)
 static void free_mem(struct run_ctx *ctx)
 {
 	if (ctx->huge) {
-		if (ctx->buf)
-			free_hugepage_region(ctx->buf);
+		if (ctx->t_ctx.buf)
+			free_hugepage_region(ctx->t_ctx.buf);
 		reset_huge_tlb_pages(0);
 	} else {
-		if (ctx->buf)
-			free(ctx->buf);
+		if (ctx->t_ctx.buf)
+			free(ctx->t_ctx.buf);
 	}
 }
 
@@ -413,14 +413,14 @@ static int lock_mem(struct run_ctx *ctx)
 	int ret;
 
 	if (ctx->lock_memory)
-		ret = mlock(ctx->buf, ctx->size);
+		ret = mlock(ctx->t_ctx.buf, ctx->size);
 	return ret;
 }
 
 static void read_fault(struct run_ctx *ctx)
 {
 	uint8_t dummy_buf[4096];
-	uint8_t *read_ptr = ctx->buf;
+	uint8_t *read_ptr = ctx->t_ctx.buf;
 	uint64_t read_size = ctx->size;
 
 	if (!ctx->read_fault)
@@ -574,7 +574,7 @@ static int alloc_mr(struct run_ctx *ctx, struct thread_ctx *t, int i)
 	int err = 0;
 
 	t->u.mr_list[i] =
-			ibv_reg_mr(ctx->pd, ctx->buf + (i * ctx->step_size),
+			ibv_reg_mr(ctx->pd, ctx->t_ctx.buf + (i * ctx->step_size),
 				   ctx->mr_size, ctx->access_flags);
 	if (!t->u.mr_list[i]) {
 		fprintf(stderr, "Registered MR count = %d\n", i);
@@ -754,7 +754,7 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	read_fault(ctx);
 
 	if (ctx->write_pattern) {
-		memset(ctx->buf, ctx->pattern, ctx->size);
+		memset(ctx->t_ctx.buf, ctx->pattern, ctx->size);
 	}
 err:
 	return err;
