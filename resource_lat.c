@@ -119,6 +119,7 @@ struct thread_start_info {
 	pthread_t thread;
 	struct run_ctx *ctx;
 	struct thread_ctx t_ctx;
+	int created;
 };
 
 #define HUGE_PAGE_KPATH "/proc/sys/vm/nr_hugepages"
@@ -136,6 +137,7 @@ static void usage(const char *argv0)
 	printf("  -i --iter=iteration      how many times to iterarate the operation\n");
 	printf("  -u --huge                use huge pages\n");
 	printf("  -o --odp                 use ODP registration\n");
+	printf("  -t --threads=<threads>   Number of parallel threads\n");
 	printf("  -a --assign              use dedicated pages for each MR\n");
 	printf("  -A --all                 use all MR sizes starting from PAGE_SIZE to size\n");
 	printf("  -m --mmap                use mmap for allocation for huge pages\n");
@@ -162,6 +164,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "align",    .has_arg = 1, .val = 'l' },
 		{ .name = "iter",     .has_arg = 1, .val = 'i' },
 		{ .name = "pattern",  .has_arg = 1, .val = 'p' },
+		{ .name = "threads",  .has_arg = 1, .val = 't' },
 		{ .name = "rlimit",   .has_arg = 1, .val = 'r' },
 		{ .name = "count",    .has_arg = 1, .val = 'c' },
 		{ .name = "resource", .has_arg = 1, .val = 'R' },
@@ -184,7 +187,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:i:c:l:uoLfDSWmaA",
+	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:t:i:c:l:uoLfDSWmaA",
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
@@ -237,6 +240,9 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		case 'p':
 			ctx->write_pattern = 1;
 			ctx->pattern = *((char*)optarg);
+			break;
+		case 't':
+			ctx->threads = parse_int(optarg);
 			break;
 		case 'u':
 			ctx->huge = 1;
@@ -320,7 +326,7 @@ static int config_hugetlb_kernel(const struct run_ctx *ctx)
 	if (hpage_size == 0)
 		return -EINVAL;
 
-	num_hpages = ctx->size / hpage_size;
+	num_hpages = (ctx->size * ctx->threads) / hpage_size;
 	if (num_hpages == 0)
 		num_hpages = 1;
 
@@ -862,19 +868,20 @@ static void* do_run(void *arg)
 	int i = 0;
 	int err;
 
-	do {
-		err = do_thread_init(ctx, t_ctx);
-		if (err)
-			break;
+	err = do_thread_init(ctx, t_ctx);
+	if (err)
+		goto done;
 
+	do {
 		err = do_one_test(ctx, t_ctx);
 		if (err)
 			break;
 
-		do_thread_cleanup(ctx, t_ctx);
-
 		i++;
 	} while (i < ctx->iter);
+
+	do_thread_cleanup(ctx, t_ctx);
+done:
 	pthread_exit(NULL);
 	return NULL;
 }
@@ -902,10 +909,13 @@ static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		err = pthread_create(&threads[i].thread, NULL, &do_run, &threads[i]);
 		if (err)
 			break;
+		threads[i].created = 1;
 	}
 
-
 	for (i = 0; i < ctx->threads; i++) {
+		if (!threads[i].created)
+			continue;
+
 		pthread_join(threads[i].thread, NULL);
 
 		print_lat_stats(ctx->mr_size, &threads[i].t_ctx.alloc_stats, "alloc");
