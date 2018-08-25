@@ -68,6 +68,7 @@ struct thread_ctx {
 	} u;
 	struct time_stats alloc_stats;
 	struct time_stats free_stats;
+	long long issued;
 };
 
 struct run_ctx {
@@ -826,12 +827,8 @@ static void check_for_user_signal(const struct run_ctx *ctx)
 static void dump_global_test_cfg(struct run_ctx *ctx)
 {
 	printf("Configuration\n");
-	printf("align = ");
-	print_size(ctx->align);
-	printf("\n");
-	printf("count = ");
-	print_int(ctx->count);
-	printf("\n");
+	printf("align = "); print_size(ctx->align); printf("\n");
+	printf("count = "); print_int(ctx->count); printf("\n");
 	printf("hugetlb = %s\n", ctx->huge ? "enabled" : "disabled");
 	printf("odp = %s\n", ctx->odp ? "enabled" : "disabled");
 	printf("mmap= %s\n", ctx->mmap ? "enabled" : "disabled");
@@ -881,6 +878,7 @@ static void* do_run(void *arg)
 		if (err)
 			break;
 
+		t_ctx->issued++;
 		i++;
 	} while (i < ctx->iter);
 
@@ -890,8 +888,46 @@ done:
 	return NULL;
 }
 
+struct print_thread_ctx {
+	struct thread_start_info *threads;
+	const struct run_ctx *ctx;
+	pthread_t thread;
+};
+
+static void print_results(const struct run_ctx *ctx, struct thread_start_info *threads)
+{
+	int i;
+
+	for (i = 0; i < ctx->threads; i++) {
+		if (!threads[i].t_ctx.issued)
+			continue;
+
+		print_lat_stats(ctx->mr_size, &threads[i].t_ctx.alloc_stats, "alloc");
+		print_lat_stats(ctx->mr_size, &threads[i].t_ctx.free_stats,  "free ");
+		printf("issued:  "); print_int(threads[i].t_ctx.issued); printf("\n");
+	}
+}
+
+static void* results_printer(void *arg)
+{
+	struct print_thread_ctx *print_ctx = arg;
+	const struct run_ctx *ctx = print_ctx->ctx;
+	struct thread_start_info *threads = print_ctx->threads;
+
+	/* this barrier also ensures that all worker threads are created */
+	pthread_barrier_wait(&run_barrier);
+
+	while(1) {
+		print_results(ctx, threads);
+		sleep(1);
+	}
+	pthread_exit(NULL);
+	return NULL;
+}
+
 static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
+	struct print_thread_ctx print_ctx = { 0 };
 	struct thread_start_info *threads;
 	int err;
 	int i;
@@ -900,13 +936,19 @@ static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	if (err)
 		goto err;
 
-
 	threads = calloc(ctx->threads, sizeof(*threads));
 	if (!threads) {
 		err = -ENOMEM;
 		goto err;
 	}
-	pthread_barrier_init(&run_barrier, NULL, ctx->threads);
+	pthread_barrier_init(&run_barrier, NULL, ctx->threads + 1);
+	print_ctx.ctx = ctx;
+	print_ctx.threads = threads;
+
+	err = pthread_create(&print_ctx.thread,
+			     NULL, &results_printer, &print_ctx);
+	if (err)
+		goto thr_err;
 
 	for (i = 0; i < ctx->threads; i++) {
 		threads[i].ctx = ctx;
@@ -923,10 +965,13 @@ static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 
 		pthread_join(threads[i].thread, NULL);
 
-		print_lat_stats(ctx->mr_size, &threads[i].t_ctx.alloc_stats, "alloc");
-		print_lat_stats(ctx->mr_size, &threads[i].t_ctx.free_stats,  "free ");
-		printf("issued:  "); print_int(ctx->iter); printf("\n");
 	}
+	pthread_cancel(print_ctx.thread);
+	pthread_join(print_ctx.thread, NULL);
+
+	print_results(ctx, threads);
+thr_err:
+	free(threads);
 err:
 	pthread_barrier_destroy(&run_barrier);
 	cleanup_test(ctx);
