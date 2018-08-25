@@ -102,7 +102,8 @@ struct run_ctx {
 	int lock_memory;
 	int dedicated_pages;	/* Each MR gets dedicated pages */
 	int read_fault;
-	int count;
+	int count;		/* resource/operation count */
+	int iter;		/* iteration - how many times to operate */
 	int write_pattern;
 	int drop_ipc_lock_cap;
 	int segfault;
@@ -125,8 +126,9 @@ static void usage(const char *argv0)
 	printf("  -d, --ibdev=<ibdev>      use IB device <dev> (default first device found)\n");
 	printf("  -s --size=<size>         size of mr in bytes (default 4096)\n");
 	printf("  -l --align=<align_size>  align memory allocation to this size\n");
-	printf("  -c --count=<count>       number of memory regions to register\n");
+	printf("  -c --count=<count>       number of resources (i.e. MR, PD etc) to alloc/register\n");
 	printf("  -r --rlimit=<bytes>      memory resource hard limit in bytes\n");
+	printf("  -i --iter=iteration      how many times to iterarate the operation\n");
 	printf("  -u --huge                use huge pages\n");
 	printf("  -o --odp                 use ODP registration\n");
 	printf("  -a --assign              use dedicated pages for each MR\n");
@@ -153,6 +155,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "ibdev",    .has_arg = 1, .val = 'd' },
 		{ .name = "size",     .has_arg = 1, .val = 's' },
 		{ .name = "align",    .has_arg = 1, .val = 'l' },
+		{ .name = "iter",     .has_arg = 1, .val = 'i' },
 		{ .name = "pattern",  .has_arg = 1, .val = 'p' },
 		{ .name = "rlimit",   .has_arg = 1, .val = 'r' },
 		{ .name = "count",    .has_arg = 1, .val = 'c' },
@@ -176,7 +179,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:c:l:uoLfDSWmaA",
+	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:i:c:l:uoLfDSWmaA",
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
@@ -217,7 +220,10 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			ctx->mmap = 1;
 			break;
 		case 'c':
-			ctx->count = parse_size(optarg);
+			ctx->count = parse_int(optarg);
+			break;
+		case 'i':
+			ctx->iter = parse_int(optarg);
 			break;
 		case 'r':
 			ctx->rlimit = parse_size(optarg);
@@ -268,14 +274,13 @@ static void normalize_sizes(struct run_ctx *ctx)
 
 static void start_statistics(struct statistics *s)
 {
-	memset(s, 0, sizeof(*s));
 	s->start = current_time();
 }
 
 static void finish_statistics(struct statistics *s)
 {
 	s->finish = current_time();
-	s->load_time = s->finish - s->start;
+	s->load_time += s->finish - s->start;
 }
 
 static int config_hugetlb_pages(uint64_t num_hpages)
@@ -592,7 +597,7 @@ static int alloc_mw(struct run_ctx *ctx, struct thread_ctx *t, int i)
 
 static int allocate_resources(struct run_ctx *ctx)
 {
-	struct statistics stat;
+	struct statistics stat = { 0 };
 	int err = 0;
 	int type;
 	int i;
@@ -654,7 +659,7 @@ static void free_mw(struct thread_ctx *t, int i)
 
 static void free_resources(struct run_ctx *ctx)
 {
-	struct statistics stat;
+	struct statistics stat = { 0 };
 	int err;
 	int i;
 
@@ -761,7 +766,7 @@ static void print_lat_stats(uint64_t size, struct time_stats *s, char *str)
 		printf("size: "); print_size(size); printf(" ");
 	}
 
-	printf("%s lat:", str);
+	printf("%s lat: ", str);
 	printf(" min="); print_time(s->min); printf(",");
 	printf(" max="); print_time(s->max); printf(",");
 	printf(" avg="); print_time(s->avg); printf(",");
@@ -809,24 +814,17 @@ static void dump_global_test_cfg(struct run_ctx *ctx)
 	printf("mmap= %s\n", ctx->mmap ? "enabled" : "disabled");
 }
 
-static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
+static int do_one_test(struct run_ctx *ctx)
 {
 	int err;
 
-	err = setup_test(ctx, ib_dev);
-	if (err)
-		goto err;
-
 	start_statistics(&ctx->t_ctx.alloc_stats.total);
-
 	err = allocate_resources(ctx);
+	finish_statistics(&ctx->t_ctx.alloc_stats.total);
 	if (err) {
 		fprintf(stderr, "Couldn't register resources\n");
 		goto cleanup;
 	}
-	finish_statistics(&ctx->t_ctx.alloc_stats.total);
-
-	print_lat_stats(ctx->mr_size, &ctx->t_ctx.alloc_stats, "alloc");
 
 	check_for_user_signal(ctx);
 	check_for_segfault(ctx);
@@ -834,14 +832,35 @@ static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	start_statistics(&ctx->t_ctx.free_stats.total);
 	free_resources(ctx);
 	finish_statistics(&ctx->t_ctx.free_stats.total);
-
-	print_lat_stats(ctx->mr_size, &ctx->t_ctx.free_stats, "free");
-
-	cleanup_test(ctx);
 	return 0;
 
 cleanup:
 	free_resources(ctx);
+	return err;
+}
+
+static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
+{
+	int err;
+	int i;
+
+	err = setup_test(ctx, ib_dev);
+	if (err)
+		goto err;
+
+	do {
+		err = do_one_test(ctx);
+		if (err)
+			break;
+		i++;
+	} while (i < ctx->iter);
+
+	print_lat_stats(ctx->mr_size, &ctx->t_ctx.alloc_stats, "alloc");
+	print_lat_stats(ctx->mr_size, &ctx->t_ctx.free_stats,  "free ");
+	printf("issued:  "); print_int(ctx->iter); printf("\n");
+	cleanup_test(ctx);
+	return 0;
+
 err:
 	cleanup_test(ctx);
 	return err;
@@ -871,6 +890,7 @@ int main(int argc, char **argv)
 	ctx->page_size = sysconf(_SC_PAGESIZE);
 	ctx->align = sysconf(_SC_PAGESIZE);
 	ctx->count = 1;
+	ctx->iter = 1;
 
 	parse_options(ctx, argc, argv);
 
