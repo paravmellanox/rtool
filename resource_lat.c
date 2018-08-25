@@ -73,8 +73,6 @@ struct run_ctx {
 	struct ibv_context *context;
 	struct ibv_pd *pd;
 
-	struct thread_ctx t_ctx;
-
 	uint64_t size;
 	uint64_t mr_size;	/* mr_size and size are same if all MR
 				 * register the same pages.
@@ -104,6 +102,7 @@ struct run_ctx {
 	int read_fault;
 	int count;		/* resource/operation count */
 	int iter;		/* iteration - how many times to operate */
+	int threads;
 	int write_pattern;
 	int drop_ipc_lock_cap;
 	int segfault;
@@ -114,6 +113,12 @@ struct run_ctx {
 	uint64_t step_size;	/* every new MR will be at this
 				 * step_size from base address.
 				 */
+};
+
+struct thread_start_info {
+	pthread_t thread;
+	struct run_ctx *ctx;
+	struct thread_ctx t_ctx;
 };
 
 #define HUGE_PAGE_KPATH "/proc/sys/vm/nr_hugepages"
@@ -307,7 +312,7 @@ static void reset_huge_tlb_pages(uint64_t num_pages)
 	config_hugetlb_pages(num_pages);
 }
 
-static int config_hugetlb_kernel(struct run_ctx *ctx)
+static int config_hugetlb_kernel(const struct run_ctx *ctx)
 {
 	long hpage_size = gethugepagesize();
 	uint64_t num_hpages;
@@ -322,21 +327,21 @@ static int config_hugetlb_kernel(struct run_ctx *ctx)
 	return config_hugetlb_pages(num_hpages);
 }
 
-static int alloc_hugepage_mem(struct run_ctx *ctx)
+static int alloc_hugepage_mem(const struct run_ctx *ctx, struct thread_ctx *t_ctx)
 {
 	int mmap_flags = MAP_ANONYMOUS | MAP_PRIVATE;
 
 	if (ctx->mmap) {
 		mmap_flags |= MAP_HUGETLB;
-		ctx->t_ctx.buf = mmap(0, ctx->size, PROT_WRITE | PROT_READ,
+		t_ctx->buf = mmap(0, ctx->size, PROT_WRITE | PROT_READ,
 				mmap_flags, 0, 0);
-		if (ctx->t_ctx.buf == MAP_FAILED) {
+		if (t_ctx->buf == MAP_FAILED) {
 			perror("mmap");
 			return -ENOMEM;
 		}
 	} else {
-		ctx->t_ctx.buf = get_hugepage_region(ctx->size, GHR_STRICT | GHR_COLOR);
-		if (!ctx->t_ctx.buf) {
+		t_ctx->buf = get_hugepage_region(ctx->size, GHR_STRICT | GHR_COLOR);
+		if (!t_ctx->buf) {
 			perror("mmap");
 			return -ENOMEM;
 		}
@@ -344,7 +349,7 @@ static int alloc_hugepage_mem(struct run_ctx *ctx)
 	return 0;
 }
 
-static int alloc_mem(struct run_ctx *ctx)
+static int alloc_mem(const struct run_ctx *ctx, struct thread_ctx *t_ctx)
 {
 	int err = 0;
 
@@ -355,12 +360,12 @@ static int alloc_mem(struct run_ctx *ctx)
 			err = -EINVAL;
 			return err;
 		}
-		err = alloc_hugepage_mem(ctx);
+		err = alloc_hugepage_mem(ctx, t_ctx);
 		if (err)
 			return err;
 	} else {
-		ctx->t_ctx.buf = memalign(ctx->align, ctx->size);
-		if (!ctx->t_ctx.buf) {
+		t_ctx->buf = memalign(ctx->align, ctx->size);
+		if (!t_ctx->buf) {
 			fprintf(stderr, "Couldn't allocate work buf.\n");
 			err = -ENOMEM;
 			return err;
@@ -370,15 +375,15 @@ static int alloc_mem(struct run_ctx *ctx)
 	return err;
 }
 
-static void free_mem(struct run_ctx *ctx)
+static void free_mem(const struct run_ctx *ctx, struct thread_ctx *t_ctx)
 {
 	if (ctx->huge) {
-		if (ctx->t_ctx.buf)
-			free_hugepage_region(ctx->t_ctx.buf);
+		if (t_ctx->buf)
+			free_hugepage_region(t_ctx->buf);
 		reset_huge_tlb_pages(0);
 	} else {
-		if (ctx->t_ctx.buf)
-			free(ctx->t_ctx.buf);
+		if (t_ctx->buf)
+			free(t_ctx->buf);
 	}
 }
 
@@ -408,19 +413,19 @@ static int set_rlimit(struct run_ctx *ctx)
 	return ret;
 }
 
-static int lock_mem(struct run_ctx *ctx)
+static int lock_mem(const struct run_ctx *ctx, struct thread_ctx *t_ctx)
 {
 	int ret;
 
 	if (ctx->lock_memory)
-		ret = mlock(ctx->t_ctx.buf, ctx->size);
+		ret = mlock(t_ctx->buf, ctx->size);
 	return ret;
 }
 
-static void read_fault(struct run_ctx *ctx)
+static void read_fault(const struct run_ctx *ctx, struct thread_ctx *t_ctx)
 {
 	uint8_t dummy_buf[4096];
-	uint8_t *read_ptr = ctx->t_ctx.buf;
+	uint8_t *read_ptr = t_ctx->buf;
 	uint64_t read_size = ctx->size;
 
 	if (!ctx->read_fault)
@@ -476,7 +481,8 @@ static int setup_ipc_lock_cap(struct run_ctx *ctx)
 	return ret;
 }
 
-static int alloc_resource_holder(struct run_ctx *ctx, struct thread_ctx *t)
+static int alloc_resource_holder(const struct run_ctx *ctx,
+				 struct thread_ctx *t)
 {
 	t->u.mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
 	if (!t->u.mr_list) {
@@ -545,7 +551,7 @@ static void update_avg(const struct statistics *stat,
 	t->avg = new_avg;
 }
 
-static int alloc_uctx(struct run_ctx *ctx, struct thread_ctx *t, int i)
+static int alloc_uctx(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
 	int err = 0;
 
@@ -557,7 +563,7 @@ static int alloc_uctx(struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return err;
 }
 
-static int alloc_pd(struct run_ctx *ctx, struct thread_ctx *t, int i)
+static int alloc_pd(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
 	int err = 0;
 
@@ -569,12 +575,12 @@ static int alloc_pd(struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return err;
 }
 
-static int alloc_mr(struct run_ctx *ctx, struct thread_ctx *t, int i)
+static int alloc_mr(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
 	int err = 0;
 
 	t->u.mr_list[i] =
-			ibv_reg_mr(ctx->pd, ctx->t_ctx.buf + (i * ctx->step_size),
+			ibv_reg_mr(ctx->pd, t->buf + (i * ctx->step_size),
 				   ctx->mr_size, ctx->access_flags);
 	if (!t->u.mr_list[i]) {
 		fprintf(stderr, "Registered MR count = %d\n", i);
@@ -583,7 +589,7 @@ static int alloc_mr(struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return err;
 }
 
-static int alloc_mw(struct run_ctx *ctx, struct thread_ctx *t, int i)
+static int alloc_mw(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
 	int err = 0;
 
@@ -595,7 +601,7 @@ static int alloc_mw(struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return err;
 }
 
-static int allocate_resources(struct run_ctx *ctx)
+static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	struct statistics stat = { 0 };
 	int err = 0;
@@ -610,25 +616,25 @@ static int allocate_resources(struct run_ctx *ctx)
 		start_statistics(&stat);
 		switch (type) {
 		case RTYPE_UCTX:
-			err = alloc_uctx(ctx, &ctx->t_ctx, i);
+			err = alloc_uctx(ctx, t, i);
 			break;
 		case RTYPE_PD:
-			err = alloc_pd(ctx, &ctx->t_ctx, i);
+			err = alloc_pd(ctx, t, i);
 			break;
 		case RTYPE_MR:
-			err = alloc_mr(ctx, &ctx->t_ctx, i);
+			err = alloc_mr(ctx, t, i);
 			break;
 		case RTYPE_MW:
-			err = alloc_mw(ctx, &ctx->t_ctx, i);
+			err = alloc_mw(ctx, t, i);
 			break;
 		}
 		finish_statistics(&stat);
 		if (err)
 			break;
-		update_min(&stat, &ctx->t_ctx.alloc_stats);
-		update_max(&stat, &ctx->t_ctx.alloc_stats);
-		update_avg(&stat, &ctx->t_ctx.alloc_stats);
-		ctx->t_ctx.alloc_stats.count++;
+		update_min(&stat, &t->alloc_stats);
+		update_max(&stat, &t->alloc_stats);
+		update_avg(&stat, &t->alloc_stats);
+		t->alloc_stats.count++;
 	}
 	return err;
 }
@@ -657,7 +663,7 @@ static void free_mw(struct thread_ctx *t, int i)
 		ibv_dealloc_mw(t->u.mw_list[i]);
 }
 
-static void free_resources(struct run_ctx *ctx)
+static void free_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	struct statistics stat = { 0 };
 	int err;
@@ -671,23 +677,65 @@ static void free_resources(struct run_ctx *ctx)
 		start_statistics(&stat);
 		switch (err) {
 		case RTYPE_UCTX:
-			free_uctx(&ctx->t_ctx, i);
+			free_uctx(t, i);
 		case RTYPE_PD:
-			free_pd(&ctx->t_ctx, i);
+			free_pd(t, i);
 			break;
 		case RTYPE_MR:
-			free_mr(&ctx->t_ctx, i);
+			free_mr(t, i);
 			break;
 		case RTYPE_MW:
-			free_mw(&ctx->t_ctx, i);
+			free_mw(t, i);
 			break;
 		}
 		finish_statistics(&stat);
-		update_min(&stat, &ctx->t_ctx.free_stats);
-		update_max(&stat, &ctx->t_ctx.free_stats);
-		update_avg(&stat, &ctx->t_ctx.free_stats);
-		ctx->t_ctx.free_stats.count++;
+		update_min(&stat, &t->free_stats);
+		update_max(&stat, &t->free_stats);
+		update_avg(&stat, &t->free_stats);
+		t->free_stats.count++;
 	}
+}
+
+static int do_thread_init(const struct run_ctx *ctx, struct thread_ctx *t_ctx)
+{
+	int err;
+
+	err = alloc_resource_holder(ctx, t_ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't allocate resource holding memory\n");
+		goto err;
+	}
+	t_ctx->alloc_stats.min = LLONG_MAX;
+	t_ctx->alloc_stats.max = LLONG_MIN;
+	t_ctx->alloc_stats.count = 0;
+	t_ctx->free_stats.min = LLONG_MAX;
+	t_ctx->free_stats.max = LLONG_MIN;
+	t_ctx->free_stats.count = 0;
+
+	err = alloc_mem(ctx, t_ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't allocate memory of size %ld\n",
+			ctx->size);
+		goto err;
+	}
+	err = lock_mem(ctx, t_ctx);
+	if (err) {
+		fprintf(stderr, "Couldn't lock memory of size %ld\n",
+			ctx->size);
+		goto err;
+	}
+
+	read_fault(ctx, t_ctx);
+
+	if (ctx->write_pattern)
+		memset(t_ctx->buf, ctx->pattern, ctx->size);
+err:
+	return err;
+}
+
+static void do_thread_cleanup(const struct run_ctx *ctx, struct thread_ctx *t_ctx)
+{
+	free_mem(ctx, t_ctx);
 }
 
 static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
@@ -725,37 +773,6 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		ctx->access_flags |= IBV_ACCESS_ON_DEMAND;
 
 	ctx->device = ib_dev;
-
-	err = alloc_resource_holder(ctx, &ctx->t_ctx);
-	if (err) {
-		fprintf(stderr, "Couldn't allocate resource holding memory\n");
-		goto err;
-	}
-	ctx->t_ctx.alloc_stats.min = LLONG_MAX;
-	ctx->t_ctx.alloc_stats.max = LLONG_MIN;
-	ctx->t_ctx.alloc_stats.count = 0;
-	ctx->t_ctx.free_stats.min = LLONG_MAX;
-	ctx->t_ctx.free_stats.max = LLONG_MIN;
-	ctx->t_ctx.free_stats.count = 0;
-
-	err = alloc_mem(ctx);
-	if (err) {
-		fprintf(stderr, "Couldn't allocate memory of size %ld\n",
-			ctx->size);
-		goto err;
-	}
-	err = lock_mem(ctx);
-	if (err) {
-		fprintf(stderr, "Couldn't lock memory of size %ld\n",
-			ctx->size);
-		goto err;
-	}
-
-	read_fault(ctx);
-
-	if (ctx->write_pattern) {
-		memset(ctx->t_ctx.buf, ctx->pattern, ctx->size);
-	}
 err:
 	return err;
 }
@@ -780,17 +797,15 @@ static void cleanup_test(struct run_ctx *ctx)
 		ibv_dealloc_pd(ctx->pd);
 	if (ctx->context)
 		ibv_close_device(ctx->context);
-	if (ctx)
-		free_mem(ctx);
 }
 
-static void check_for_segfault(struct run_ctx *ctx)
+static void check_for_segfault(const struct run_ctx *ctx)
 {
 	if (ctx->segfault)
 		*((char*)NULL) = 'a';
 }
 
-static void check_for_user_signal(struct run_ctx *ctx)
+static void check_for_user_signal(const struct run_ctx *ctx)
 {
 	char temp;
 
@@ -814,13 +829,13 @@ static void dump_global_test_cfg(struct run_ctx *ctx)
 	printf("mmap= %s\n", ctx->mmap ? "enabled" : "disabled");
 }
 
-static int do_one_test(struct run_ctx *ctx)
+static int do_one_test(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	int err;
 
-	start_statistics(&ctx->t_ctx.alloc_stats.total);
-	err = allocate_resources(ctx);
-	finish_statistics(&ctx->t_ctx.alloc_stats.total);
+	start_statistics(&t->alloc_stats.total);
+	err = allocate_resources(ctx, t);
+	finish_statistics(&t->alloc_stats.total);
 	if (err) {
 		fprintf(stderr, "Couldn't register resources\n");
 		goto cleanup;
@@ -829,18 +844,44 @@ static int do_one_test(struct run_ctx *ctx)
 	check_for_user_signal(ctx);
 	check_for_segfault(ctx);
 
-	start_statistics(&ctx->t_ctx.free_stats.total);
-	free_resources(ctx);
-	finish_statistics(&ctx->t_ctx.free_stats.total);
+	start_statistics(&t->free_stats.total);
+	free_resources(ctx, t);
+	finish_statistics(&t->free_stats.total);
 	return 0;
 
 cleanup:
-	free_resources(ctx);
+	free_resources(ctx, t);
 	return err;
+}
+
+static void* do_run(void *arg)
+{
+	struct thread_start_info *info = arg;
+	struct thread_ctx *t_ctx = &info->t_ctx;
+	const struct run_ctx *ctx = info->ctx;
+	int i = 0;
+	int err;
+
+	do {
+		err = do_thread_init(ctx, t_ctx);
+		if (err)
+			break;
+
+		err = do_one_test(ctx, t_ctx);
+		if (err)
+			break;
+
+		do_thread_cleanup(ctx, t_ctx);
+
+		i++;
+	} while (i < ctx->iter);
+	pthread_exit(NULL);
+	return NULL;
 }
 
 static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
+	struct thread_start_info *threads;
 	int err;
 	int i;
 
@@ -848,16 +889,30 @@ static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	if (err)
 		goto err;
 
-	do {
-		err = do_one_test(ctx);
+
+	threads = calloc(ctx->threads, sizeof(*threads));
+	if (!threads) {
+		err = -ENOMEM;
+		goto err;
+	}
+
+	for (i = 0; i < ctx->threads; i++) {
+		threads[i].ctx = ctx;
+
+		err = pthread_create(&threads[i].thread, NULL, &do_run, &threads[i]);
 		if (err)
 			break;
-		i++;
-	} while (i < ctx->iter);
+	}
 
-	print_lat_stats(ctx->mr_size, &ctx->t_ctx.alloc_stats, "alloc");
-	print_lat_stats(ctx->mr_size, &ctx->t_ctx.free_stats,  "free ");
-	printf("issued:  "); print_int(ctx->iter); printf("\n");
+
+	for (i = 0; i < ctx->threads; i++) {
+		pthread_join(threads[i].thread, NULL);
+
+		print_lat_stats(ctx->mr_size, &threads[i].t_ctx.alloc_stats, "alloc");
+		print_lat_stats(ctx->mr_size, &threads[i].t_ctx.free_stats,  "free ");
+		printf("issued:  "); print_int(ctx->iter); printf("\n");
+	}
+
 	cleanup_test(ctx);
 	return 0;
 
@@ -891,6 +946,7 @@ int main(int argc, char **argv)
 	ctx->align = sysconf(_SC_PAGESIZE);
 	ctx->count = 1;
 	ctx->iter = 1;
+	ctx->threads = 1;
 
 	parse_options(ctx, argc, argv);
 
