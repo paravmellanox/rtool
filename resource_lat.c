@@ -1055,7 +1055,16 @@ int main(int argc, char **argv)
 		ctx->size = ctx->min_mr_size;
 		normalize_sizes(ctx);
 		err = do_test(ctx, ib_dev);
+
+		if (ctx->min_mr_size == ctx->max_mr_size)
+			break;
+
 		ctx->min_mr_size *= 2;
+		/* when mr size is not aligned, still need to calculate for
+		 * maximum size.
+		 */
+		if (ctx->min_mr_size > ctx->max_mr_size)
+			ctx->min_mr_size = ctx->max_mr_size;
 	}
 err:
 	ibv_free_device_list(dev_list);
