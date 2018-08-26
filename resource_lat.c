@@ -110,6 +110,7 @@ struct run_ctx {
 	int drop_ipc_lock_cap;
 	int segfault;
 	int wait;
+	int report_interval;
 	char pattern;
 	char *ibdev_name;
 	char *resource_type;
@@ -144,6 +145,7 @@ static void usage(const char *argv0)
 	printf("  -a --assign              use dedicated pages for each MR\n");
 	printf("  -A --all                 use all MR sizes starting from PAGE_SIZE to size\n");
 	printf("  -m --mmap                use mmap for allocation for huge pages\n");
+	printf("  -I --interval            seconds between periodic reports\n");
 	printf("  -L --lock                lock memory before registration\n");
 	printf("  -f --fault               read page fault memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
@@ -170,6 +172,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "threads",  .has_arg = 1, .val = 't' },
 		{ .name = "rlimit",   .has_arg = 1, .val = 'r' },
 		{ .name = "count",    .has_arg = 1, .val = 'c' },
+		{ .name = "interval", .has_arg = 1, .val = 'I' },
 		{ .name = "resource", .has_arg = 1, .val = 'R' },
 		{ .name = "huge",     .has_arg = 0, .val = 'u' },
 		{ .name = "odp",      .has_arg = 0, .val = 'o' },
@@ -190,7 +193,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:R:p:r:s:t:i:c:l:uoLfDSWmaA",
+	while ((opt = getopt_long(argc, argv, "hv:d:I:R:p:r:s:t:i:c:l:uoLfDSWmaA",
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
@@ -223,6 +226,9 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'A':
 			ctx->min_mr_size = sysconf(_SC_PAGESIZE);
+			break;
+		case 'I':
+			ctx->report_interval = parse_int(optarg);
 			break;
 		case 'l':
 			ctx->align = parse_size(optarg);
@@ -919,7 +925,7 @@ static void* results_printer(void *arg)
 
 	while(1) {
 		print_results(ctx, threads);
-		sleep(1);
+		sleep(ctx->report_interval);
 	}
 	pthread_exit(NULL);
 	return NULL;
@@ -929,6 +935,7 @@ static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
 	struct print_thread_ctx print_ctx = { 0 };
 	struct thread_start_info *threads;
+	int waiters = ctx->threads;
 	int err;
 	int i;
 
@@ -941,14 +948,18 @@ static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		err = -ENOMEM;
 		goto err;
 	}
-	pthread_barrier_init(&run_barrier, NULL, ctx->threads + 1);
+
+	waiters += (ctx->report_interval ? 1 : 0);
+	pthread_barrier_init(&run_barrier, NULL, waiters);
 	print_ctx.ctx = ctx;
 	print_ctx.threads = threads;
 
-	err = pthread_create(&print_ctx.thread,
-			     NULL, &results_printer, &print_ctx);
-	if (err)
-		goto thr_err;
+	if (ctx->report_interval) {
+		err = pthread_create(&print_ctx.thread,
+				     NULL, &results_printer, &print_ctx);
+		if (err)
+			goto thr_err;
+	}
 
 	for (i = 0; i < ctx->threads; i++) {
 		threads[i].ctx = ctx;
@@ -966,8 +977,11 @@ static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 		pthread_join(threads[i].thread, NULL);
 
 	}
-	pthread_cancel(print_ctx.thread);
-	pthread_join(print_ctx.thread, NULL);
+
+	if (ctx->report_interval) {
+		pthread_cancel(print_ctx.thread);
+		pthread_join(print_ctx.thread, NULL);
+	}
 
 	print_results(ctx, threads);
 thr_err:
