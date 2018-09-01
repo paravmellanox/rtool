@@ -66,6 +66,8 @@ struct thread_ctx {
 		struct ibv_context **uctx_list;
 		struct ibv_mw **mw_list;
 	} u;
+	struct ibv_cq **cq_list;
+	struct ibv_qp **qp_list;
 	struct time_stats alloc_stats;
 	struct time_stats free_stats;
 	long long issued;
@@ -149,9 +151,9 @@ static void usage(const char *argv0)
 	printf("  -L --lock                lock memory before registration\n");
 	printf("  -f --fault               read page fault memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
-	printf("  -R --resource            resource type (pd, mr, uctx, mw)\n");
+	printf("  -R --resource            resource type (pd, mr, uctx, mw, qp)\n");
 	printf("  -S --segfault            seg fault after registration\n");
-	printf("  -W --wait                Wait for user signal before destroy\n");
+	printf("  -W --wait                Wait for user signal before resource creation and destroy\n");
 	printf("  -h                       display this help message\n");
 	printf("  -v                       display program version\n");
 }
@@ -496,22 +498,12 @@ static int setup_ipc_lock_cap(struct run_ctx *ctx)
 	return ret;
 }
 
-static int alloc_resource_holder(const struct run_ctx *ctx,
-				 struct thread_ctx *t)
-{
-	t->u.mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
-	if (!t->u.mr_list) {
-		fprintf(stderr, "Couldn't allocate list memory\n");
-		return -ENOMEM;
-	}
-	return 0;
-}
-
 enum resource_id {
 	RTYPE_PD,
 	RTYPE_MR,
 	RTYPE_UCTX,
 	RTYPE_MW,
+	RTYPE_QP,
 	RTYPE_MAX
 };
 
@@ -525,6 +517,7 @@ static const struct resource_info resource_types[] = {
 	{ RTYPE_MR, "mr", },
 	{ RTYPE_UCTX, "uctx", },
 	{ RTYPE_MW, "mw", },
+	{ RTYPE_QP, "qp", },
 	{ -1, NULL, },
 };
 
@@ -544,6 +537,29 @@ static int check_resource_type(char *type)
 	return err;
 }
 
+
+static int alloc_resource_holder(const struct run_ctx *ctx,
+				 struct thread_ctx *t)
+{
+	int type;
+
+	type = check_resource_type(ctx->resource_type);
+	if (type == RTYPE_QP) {
+		t->qp_list = calloc(ctx->count, sizeof(struct ibv_qp*));
+		if (!t->qp_list) {
+			fprintf(stderr, "Couldn't allocate qp list memory\n");
+			return -ENOMEM;
+		}
+		return 0;
+	}
+
+	t->u.mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
+	if (!t->u.mr_list) {
+		fprintf(stderr, "Couldn't allocate list memory\n");
+		return -ENOMEM;
+	}
+	return 0;
+}
 static void update_min(const struct statistics *stat, struct time_stats *t)
 {
 	if (stat->load_time < t->min)
@@ -616,6 +632,27 @@ static int alloc_mw(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return err;
 }
 
+static int alloc_qp(const struct run_ctx *ctx, struct thread_ctx *t, int i)
+{
+	struct ibv_qp_init_attr qp_attr = { 0 };
+	int err = 0;
+
+	qp_attr.send_cq = qp_attr.recv_cq = NULL;
+	qp_attr.cap.max_send_wr = 128;
+	qp_attr.cap.max_recv_wr = 128;
+	qp_attr.cap.max_send_sge = 2;
+	qp_attr.cap.max_recv_sge = 2;
+	qp_attr.qp_type = IBV_QPT_RC;
+	qp_attr.sq_sig_all = 1;
+
+	t->qp_list[i] = ibv_create_qp(ctx->pd, &qp_attr);
+	if (!t->qp_list[i]) {
+		fprintf(stderr, "Registered QP count = %d\n", i);
+		err = -ENOMEM;
+	}
+	return err;
+}
+
 static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	struct statistics stat = { 0 };
@@ -641,6 +678,9 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 			break;
 		case RTYPE_MW:
 			err = alloc_mw(ctx, t, i);
+			break;
+		case RTYPE_QP:
+			err = alloc_qp(ctx, t, i);
 			break;
 		}
 		finish_statistics(&stat);
@@ -678,6 +718,12 @@ static void free_mw(struct thread_ctx *t, int i)
 		ibv_dealloc_mw(t->u.mw_list[i]);
 }
 
+static void free_qp(struct thread_ctx *t, int i)
+{
+	if (t->qp_list[i])
+		ibv_destroy_qp(t->qp_list[i]);
+}
+
 static void free_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	struct statistics stat = { 0 };
@@ -701,6 +747,9 @@ static void free_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 			break;
 		case RTYPE_MW:
 			free_mw(t, i);
+			break;
+		case RTYPE_QP:
+			free_qp(t, i);
 			break;
 		}
 		finish_statistics(&stat);
@@ -843,6 +892,8 @@ static void dump_global_test_cfg(struct run_ctx *ctx)
 static int do_one_test(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	int err;
+
+	check_for_user_signal(ctx);
 
 	start_statistics(&t->alloc_stats.total);
 	err = allocate_resources(ctx, t);
