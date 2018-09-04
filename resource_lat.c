@@ -43,6 +43,8 @@
 #include <sys/resource.h>
 #include <sys/mman.h>
 #include <sys/capability.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "options.h"
 
@@ -882,11 +884,12 @@ static void check_for_user_signal(const struct run_ctx *ctx)
 static void dump_global_test_cfg(struct run_ctx *ctx)
 {
 	printf("Configuration\n");
-	printf("align = "); print_size(ctx->align); printf("\n");
-	printf("count = "); print_int(ctx->count); printf("\n");
+	printf("pid     = %d\n", getpid());
+	printf("align   = "); print_size(ctx->align); printf("\n");
+	printf("count   = "); print_int(ctx->count); printf("\n");
 	printf("hugetlb = %s\n", ctx->huge ? "enabled" : "disabled");
-	printf("odp = %s\n", ctx->odp ? "enabled" : "disabled");
-	printf("mmap= %s\n", ctx->mmap ? "enabled" : "disabled");
+	printf("odp     = %s\n", ctx->odp ? "enabled" : "disabled");
+	printf("mmap    = %s\n", ctx->mmap ? "enabled" : "disabled");
 }
 
 static int do_one_test(const struct run_ctx *ctx, struct thread_ctx *t)
@@ -941,7 +944,8 @@ static void* do_run(void *arg)
 
 	do_thread_cleanup(ctx, t_ctx);
 done:
-	pthread_exit(NULL);
+	if (ctx->threads > 1)
+		pthread_exit(NULL);
 	return NULL;
 }
 
@@ -982,13 +986,45 @@ static void* results_printer(void *arg)
 	return NULL;
 }
 
+static int run_threads(struct run_ctx *ctx, struct thread_start_info *threads)
+{
+	int err;
+	int i;
+
+	for (i = 0; i < ctx->threads; i++) {
+		threads[i].ctx = ctx;
+
+		err = pthread_create(&threads[i].thread, NULL,
+				     &do_run, &threads[i]);
+		if (err)
+			break;
+		threads[i].created = 1;
+	}
+
+	for (i = 0; i < ctx->threads; i++) {
+		if (!threads[i].created)
+			continue;
+
+		pthread_join(threads[i].thread, NULL);
+
+	}
+	return err;
+}
+
+static int run_one_instance(struct run_ctx *ctx,
+			    struct thread_start_info *threads)
+{
+	threads[0].ctx = ctx;
+	do_run(&threads[0]);
+	return 0;
+}
+
 static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
 	struct print_thread_ctx print_ctx = { 0 };
 	struct thread_start_info *threads;
 	int waiters = ctx->threads;
 	int err;
-	int i;
 
 	err = setup_test(ctx, ib_dev);
 	if (err)
@@ -1012,22 +1048,10 @@ static int do_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 			goto thr_err;
 	}
 
-	for (i = 0; i < ctx->threads; i++) {
-		threads[i].ctx = ctx;
-
-		err = pthread_create(&threads[i].thread, NULL, &do_run, &threads[i]);
-		if (err)
-			break;
-		threads[i].created = 1;
-	}
-
-	for (i = 0; i < ctx->threads; i++) {
-		if (!threads[i].created)
-			continue;
-
-		pthread_join(threads[i].thread, NULL);
-
-	}
+	if (ctx->threads > 1)
+		err = run_threads(ctx, threads);
+	else
+		err = run_one_instance(ctx, threads);
 
 	if (ctx->report_interval) {
 		pthread_cancel(print_ctx.thread);
