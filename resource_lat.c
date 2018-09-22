@@ -1102,6 +1102,14 @@ int main(int argc, char **argv)
 
 	if (!ctx->resource_type)
 		ctx->resource_type = "mr";
+	else {
+		err = check_resource_type(ctx->resource_type);
+		if (err < 0) {
+			fprintf(stderr, "Invalid resource type = %s\n",
+				ctx->resource_type);
+			goto done;
+		}
+	}
 
 	if (!ctx->ibdev_name) {
 		ib_dev = *dev_list;
@@ -1143,5 +1151,6 @@ int main(int argc, char **argv)
 	}
 err:
 	ibv_free_device_list(dev_list);
+done:
 	return err;
 }
