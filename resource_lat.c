@@ -548,7 +548,7 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 	int type;
 
 	type = check_resource_type(ctx->resource_type);
-	if (type == RTYPE_CQ) {
+	if (type == RTYPE_CQ || type == RTYPE_QP) {
 		t->cq_list = calloc(ctx->count, sizeof(struct ibv_cq*));
 		if (!t->cq_list) {
 			fprintf(stderr, "Couldn't allocate cq list memory\n");
@@ -667,7 +667,7 @@ static int alloc_qp(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 	struct ibv_qp_init_attr qp_attr = { 0 };
 	int err = 0;
 
-	qp_attr.send_cq = qp_attr.recv_cq = NULL;
+	qp_attr.send_cq = qp_attr.recv_cq = t->cq_list[i];
 	qp_attr.cap.max_send_wr = 128;
 	qp_attr.cap.max_recv_wr = 128;
 	qp_attr.cap.max_send_sge = 2;
@@ -710,6 +710,9 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 			err = alloc_mw(ctx, t, i);
 			break;
 		case RTYPE_QP:
+			err = alloc_cq(ctx, t, i);
+			if (err)
+				break;
 			err = alloc_qp(ctx, t, i);
 			break;
 		case RTYPE_CQ:
@@ -792,6 +795,7 @@ static void free_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 			break;
 		case RTYPE_QP:
 			free_qp(t, i);
+			free_cq(t, i);
 			break;
 		}
 		finish_statistics(&stat);
