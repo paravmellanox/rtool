@@ -48,6 +48,7 @@
 
 #include "options.h"
 #include "ioctl.h"
+#include "ib_user_ioctl_cmds.h"
 
 static pthread_barrier_t run_barrier;
 
@@ -783,7 +784,8 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 	int fd;
 
 	fd = ctx->context->cmd_fd;
-	ret = rdma_core_get_mr_handles(fd, ctx->count, &handles, &ret_count);
+	ret = rdma_core_get_obj_handles(fd, ctx->count, UVERBS_OBJECT_MR,
+					&handles, &ret_count);
 	if (ret) {
 		printf("%s fail to get handles\n", __func__);
 		return;

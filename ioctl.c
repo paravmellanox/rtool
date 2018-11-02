@@ -50,7 +50,7 @@ static int get_object_handles(int fd, int obj_type, int max_count,
 }
 
 /**
- * rdma_core_get_mr_handles - Get list of MR handles.
+ * rdma_core_get_obj_handles - Get list of MR handles.
  * @fd:		file descriptor of the ucontext shared via fd sharing
  * @max_count:	maximum number of handles that caller likes to
  * 		receive in the response.
@@ -59,13 +59,13 @@ static int get_object_handles(int fd, int obj_type, int max_count,
  * @ret_count:	Number of handles filled up in the handles array.
  * 		This could be same or less than the value specificed in
  * 		max_count when API returns success.
- * rdma_core_get_mr_handles() allocates and returns pointer to handles array
+ * rdma_core_get_obj_handles() allocates and returns pointer to handles array
  * when it returns succussful completion. max_count could be a any large
  * reasonable value. Caller must free memory returned at handles once caller
  * is done accessing handles array.
  */
-int rdma_core_get_mr_handles(int fd, int max_count,
-			     uint32_t **handles, uint32_t *ret_count)
+int rdma_core_get_obj_handles(int fd, int max_count, uint32_t obj_type,
+			      uint32_t **handles, uint32_t *ret_count)
 {
 	uint32_t *handles_array;
 	int ret;
@@ -74,7 +74,7 @@ int rdma_core_get_mr_handles(int fd, int max_count,
 	if (!handles_array)
 		return -ENOMEM;
 
-	ret = get_object_handles(fd, UVERBS_OBJECT_MR, max_count,
+	ret = get_object_handles(fd, obj_type, max_count,
 				 handles_array, ret_count);
 	if (ret < 0)
 		goto err;
@@ -90,7 +90,7 @@ err:
  * rdma_core_destroy_mr_by_handle - destroy mr by its handle.
  *
  * @fd:		file descriptor of the ucontext shared via fd sharing
- * @handle:	handle returned by rdma_core_get_mr_handles()
+ * @handle:	handle returned by rdma_core_get_obj_handles()
  *
  * rdma_core_destroy_mr() destroys a MR by its handle. It returns 0 on success
  * and failure error code otherwise.
