@@ -75,6 +75,7 @@ struct thread_ctx {
 	struct ibv_cq **cq_list;
 	struct ibv_qp **qp_list;
 	struct ibv_wq **wq_list;
+	struct ibv_rwq_ind_table **rq_ind_tbl_list;
 	struct time_stats alloc_stats;
 	struct time_stats free_stats;
 	long long issued;
@@ -160,7 +161,7 @@ static void usage(const char *argv0)
 	printf("  -f --fault               read page fault memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
 	printf("  -O --ioctl               destroy resource using ioctl method\n");
-	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd, wq)\n");
+	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd, wq, rqit)\n");
 	printf("  -S --segfault            seg fault after registration\n");
 	printf("  -W --wait                Wait for user signal before resource creation and destroy\n");
 	printf("  -h                       display this help message\n");
@@ -520,6 +521,7 @@ enum resource_id {
 	RTYPE_QP,
 	RTYPE_XRCD,
 	RTYPE_WQ,
+	RTYPE_RQ_IND_TBL,
 	RTYPE_MAX
 };
 
@@ -537,6 +539,7 @@ static const struct resource_info resource_types[] = {
 	{ RTYPE_CQ, "cq", },
 	{ RTYPE_XRCD, "xrcd", },
 	{ RTYPE_WQ, "wq", },
+	{ RTYPE_RQ_IND_TBL, "rqit", },
 	{ -1, NULL, },
 };
 
@@ -562,7 +565,8 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 	int type;
 
 	type = check_resource_type(ctx->resource_type);
-	if (type == RTYPE_CQ || type == RTYPE_QP || type == RTYPE_WQ) {
+	if (type == RTYPE_CQ || type == RTYPE_QP ||
+	    type == RTYPE_WQ || type == RTYPE_RQ_IND_TBL) {
 		t->cq_list = calloc(ctx->count, sizeof(struct ibv_cq*));
 		if (!t->cq_list) {
 			fprintf(stderr, "Couldn't allocate cq list memory\n");
@@ -576,12 +580,23 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 			return -ENOMEM;
 		}
 		return 0;
-	} else if (type == RTYPE_WQ) {
+	} else if (type == RTYPE_WQ || type == RTYPE_RQ_IND_TBL) {
 		t->wq_list = calloc(ctx->count, sizeof(struct ibv_wq*));
 		if (!t->wq_list) {
 			fprintf(stderr, "Couldn't allocate wq list memory\n");
 			return -ENOMEM;
 		}
+		if (type == RTYPE_RQ_IND_TBL) {
+			t->rq_ind_tbl_list =
+				calloc(ctx->count,
+				       sizeof(struct ibv_rwq_ind_table*));
+			if (!t->rq_ind_tbl_list) {
+				fprintf(stderr, "Couldn't allocate rq indir tbl\n");
+				return -ENOMEM;
+			}
+			return 0;
+		}
+
 		return 0;
 	}
 
@@ -743,6 +758,23 @@ static int alloc_wq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return err;
 }
 
+static int alloc_rq_ind_tbl(const struct run_ctx *ctx, struct thread_ctx *t, int i)
+{
+	struct ibv_rwq_ind_table_init_attr attr = { 0 };
+	int err = 0;
+
+	attr.log_ind_tbl_size = 0;
+	attr.ind_tbl = &t->wq_list[i];
+	attr.comp_mask = 0;
+
+	t->rq_ind_tbl_list[i] = ibv_create_rwq_ind_table(ctx->context, &attr);
+	if (!t->rq_ind_tbl_list[i]) {
+		fprintf(stderr, "Registered table count = %d\n", i);
+		err = -ENOMEM;
+	}
+	return err;
+}
+
 static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	struct statistics stat = { 0 };
@@ -787,6 +819,16 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 				break;
 			err = alloc_wq(ctx, t, i);
 			break;
+		case RTYPE_RQ_IND_TBL:
+			err = alloc_cq(ctx, t, i);
+			if (err)
+				break;
+			err = alloc_wq(ctx, t, i);
+			if (err)
+				break;
+			err = alloc_rq_ind_tbl(ctx, t, i);
+			if (err)
+				break;
 		}
 		finish_statistics(&stat);
 		if (err)
@@ -845,6 +887,12 @@ static void free_wq(struct thread_ctx *t, int i)
 {
 	if (t->wq_list[i])
 		ibv_destroy_wq(t->wq_list[i]);
+}
+
+static void free_rq_ind_tbl(struct thread_ctx *t, int i)
+{
+	if (t->rq_ind_tbl_list[i])
+		ibv_destroy_rwq_ind_table(t->rq_ind_tbl_list[i]);
 }
 
 static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t, int type)
@@ -946,6 +994,11 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 			free_xrcd(t, i);
 			break;
 		case RTYPE_WQ:
+			free_wq(t, i);
+			free_cq(t, i);
+			break;
+		case RTYPE_RQ_IND_TBL:
+			free_rq_ind_tbl(t, i);
 			free_wq(t, i);
 			free_cq(t, i);
 			break;
