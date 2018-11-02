@@ -196,4 +196,12 @@ enum uverbs_attrs_xrcd_destroy_ids {
 	UVERBS_ATTR_DESTROY_XRCD_HANDLE,
 };
 
+enum uverbs_methods_rwq_ind_tbl {
+	UVERBS_METHOD_RWQ_IND_TBL_DESTROY,
+};
+
+enum uverbs_attrs_rwq_ind_tbl_destroy_ids {
+	UVERBS_ATTR_DESTROY_RWQ_IND_TBL_HANDLE,
+};
+
 #endif

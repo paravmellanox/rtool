@@ -918,6 +918,9 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 	case RTYPE_XRCD:
 		uverbs_type = UVERBS_OBJECT_XRCD;
 		break;
+	case RTYPE_RQ_IND_TBL:
+		uverbs_type = UVERBS_OBJECT_RWQ_IND_TBL;
+		break;
 	default:
 		ret = -EINVAL;
 		break;
@@ -948,6 +951,9 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 			break;
 		case RTYPE_XRCD:
 			ret = rdma_core_destroy_xrcd_by_handle(fd, handles[i]);
+			break;
+		case RTYPE_RQ_IND_TBL:
+			ret = rdma_core_destroy_rwq_ind_tbl_by_handle(fd, handles[i]);
 			break;
 		default:
 			ret = -EINVAL;

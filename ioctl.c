@@ -192,3 +192,20 @@ int rdma_core_destroy_xrcd_by_handle(int fd, uint32_t handle)
 					       UVERBS_ATTR_DESTROY_XRCD_HANDLE,
 					       handle);
 }
+
+/**
+ * rdma_core_destroy_rwq_ind_tbl_by_handle - destroy RQ indirection table by its handle.
+ *
+ * @fd:		file descriptor of the ucontext shared via fd sharing
+ * @handle:	handle returned by rdma_core_get_obj_handles()
+ *
+ * rdma_core_destroy_rwq_ind_tbl_by_handle() destroy RQ indirection table by its handle.
+ * It returns 0 on success and failure error code otherwise.
+ */
+int rdma_core_destroy_rwq_ind_tbl_by_handle(int fd, uint32_t handle)
+{
+	return rdma_core_destroy_obj_by_handle(fd, UVERBS_OBJECT_RWQ_IND_TBL,
+					       UVERBS_METHOD_RWQ_IND_TBL_DESTROY,
+					       UVERBS_ATTR_DESTROY_RWQ_IND_TBL_HANDLE,
+					       handle);
+}
