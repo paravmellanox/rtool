@@ -204,4 +204,12 @@ enum uverbs_attrs_rwq_ind_tbl_destroy_ids {
 	UVERBS_ATTR_DESTROY_RWQ_IND_TBL_HANDLE,
 };
 
+enum uverbs_methods_ah {
+	UVERBS_METHOD_AH_DESTROY,
+};
+
+enum uverbs_attrs_ah_destroy_ids {
+	UVERBS_ATTR_DESTROY_AH_HANDLE,
+};
+
 #endif

@@ -209,3 +209,20 @@ int rdma_core_destroy_rwq_ind_tbl_by_handle(int fd, uint32_t handle)
 					       UVERBS_ATTR_DESTROY_RWQ_IND_TBL_HANDLE,
 					       handle);
 }
+
+/**
+ * rdma_core_destroy_ah_by_handle - destroy ah by its handle.
+ *
+ * @fd:		file descriptor of the ucontext shared via fd sharing
+ * @handle:	handle returned by rdma_core_get_obj_handles()
+ *
+ * rdma_core_destroy_ah_by_handle() destroys an AH by its handle.
+ * It returns 0 on success and failure error code otherwise.
+ */
+int rdma_core_destroy_ah_by_handle(int fd, uint32_t handle)
+{
+	return rdma_core_destroy_obj_by_handle(fd, UVERBS_OBJECT_AH,
+					       UVERBS_METHOD_AH_DESTROY,
+					       UVERBS_ATTR_DESTROY_AH_HANDLE,
+					       handle);
+}

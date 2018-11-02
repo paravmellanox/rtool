@@ -8,5 +8,6 @@ int rdma_core_destroy_pd_by_handle(int fd, uint32_t handle);
 int rdma_core_destroy_mw_by_handle(int fd, uint32_t handle);
 int rdma_core_destroy_xrcd_by_handle(int fd, uint32_t handle);
 int rdma_core_destroy_rwq_ind_tbl_by_handle(int fd, uint32_t handle);
+int rdma_core_destroy_ah_by_handle(int fd, uint32_t handle);
 
 #endif

@@ -77,6 +77,7 @@ struct thread_ctx {
 	struct ibv_qp **qp_list;
 	struct ibv_wq **wq_list;
 	struct ibv_rwq_ind_table **rq_ind_tbl_list;
+	struct ibv_flow **flow_list;
 	struct time_stats alloc_stats;
 	struct time_stats free_stats;
 	long long issued;
@@ -163,7 +164,7 @@ static void usage(const char *argv0)
 	printf("  -f --fault               read page fault memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
 	printf("  -O --ioctl               destroy resource using ioctl method\n");
-	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd, wq, rqit, ah)\n");
+	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd, wq, rqit, ah, flow)\n");
 	printf("  -S --segfault            seg fault after registration\n");
 	printf("  -W --wait                Wait for user signal before resource creation and destroy\n");
 	printf("  -h                       display this help message\n");
@@ -525,6 +526,7 @@ enum resource_id {
 	RTYPE_WQ,
 	RTYPE_RQ_IND_TBL,
 	RTYPE_AH,
+	RTYPE_FLOW,
 	RTYPE_MAX
 };
 
@@ -544,6 +546,7 @@ static const struct resource_info resource_types[] = {
 	{ RTYPE_WQ, "wq", },
 	{ RTYPE_RQ_IND_TBL, "rqit", },
 	{ RTYPE_AH, "ah", },
+	{ RTYPE_FLOW, "flow", },
 	{ -1, NULL, },
 };
 
@@ -570,20 +573,27 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 
 	type = check_resource_type(ctx->resource_type);
 	if (type == RTYPE_CQ || type == RTYPE_QP ||
-	    type == RTYPE_WQ || type == RTYPE_RQ_IND_TBL) {
+	    type == RTYPE_WQ || type == RTYPE_RQ_IND_TBL ||
+	    type == RTYPE_FLOW) {
 		t->cq_list = calloc(ctx->count, sizeof(struct ibv_cq*));
 		if (!t->cq_list) {
 			fprintf(stderr, "Couldn't allocate cq list memory\n");
 			return -ENOMEM;
 		}
 	}
-	if (type == RTYPE_QP) {
+	if (type == RTYPE_QP || type == RTYPE_FLOW) {
 		t->qp_list = calloc(ctx->count, sizeof(struct ibv_qp*));
 		if (!t->qp_list) {
 			fprintf(stderr, "Couldn't allocate qp list memory\n");
 			return -ENOMEM;
 		}
-		return 0;
+		if (type == RTYPE_FLOW) {
+			t->flow_list = calloc(ctx->count, sizeof(struct ibv_flow*));
+			if (!t->flow_list) {
+				fprintf(stderr, "Couldn't allocate flow list memory\n");
+				return -ENOMEM;
+			}
+		}
 	} else if (type == RTYPE_WQ || type == RTYPE_RQ_IND_TBL) {
 		t->wq_list = calloc(ctx->count, sizeof(struct ibv_wq*));
 		if (!t->wq_list) {
@@ -600,7 +610,6 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 			}
 			return 0;
 		}
-
 		return 0;
 	}
 
@@ -702,7 +711,8 @@ static int alloc_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return 0;
 }
 
-static int alloc_qp(const struct run_ctx *ctx, struct thread_ctx *t, int i)
+static int alloc_qp(const struct run_ctx *ctx, struct thread_ctx *t,
+		    int i, int type)
 {
 	struct ibv_qp_init_attr qp_attr = { 0 };
 	int err = 0;
@@ -712,8 +722,11 @@ static int alloc_qp(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 	qp_attr.cap.max_recv_wr = 128;
 	qp_attr.cap.max_send_sge = 2;
 	qp_attr.cap.max_recv_sge = 2;
-	qp_attr.qp_type = IBV_QPT_RC;
 	qp_attr.sq_sig_all = 1;
+	if (type == RTYPE_QP)
+		qp_attr.qp_type = IBV_QPT_RC;
+	else
+		qp_attr.qp_type = IBV_QPT_RAW_PACKET;
 
 	t->qp_list[i] = ibv_create_qp(ctx->pd, &qp_attr);
 	if (!t->qp_list[i]) {
@@ -797,6 +810,26 @@ static int alloc_ah(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return err;
 }
 
+struct raw_eth_flow_attr {
+	struct ibv_flow_attr attr;
+	struct ibv_flow_spec_eth spec_eth;
+};
+
+static int alloc_flow(struct thread_ctx *t, int i)
+{
+	struct raw_eth_flow_attr attr;
+	int err = 0;
+
+	memset(&attr, 0, sizeof(attr));
+
+	t->flow_list[i] = ibv_create_flow(t->qp_list[i], &attr.attr);
+	if (!t->flow_list[i]) {
+		fprintf(stderr, "created flow count = %d\n", i);
+		err = -ENOMEM;
+	}
+	return err;
+}
+
 static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	struct statistics stat = { 0 };
@@ -827,7 +860,7 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 			err = alloc_cq(ctx, t, i);
 			if (err)
 				break;
-			err = alloc_qp(ctx, t, i);
+			err = alloc_qp(ctx, t, i, type);
 			break;
 		case RTYPE_CQ:
 			err = alloc_cq(ctx, t, i);
@@ -852,6 +885,15 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 			break;
 		case RTYPE_AH:
 			err = alloc_ah(ctx, t, i);
+			break;
+		case RTYPE_FLOW:
+			err = alloc_cq(ctx, t, i);
+			if (err)
+				break;
+			err = alloc_qp(ctx, t, i, type);
+			if (err)
+				break;
+			err = alloc_flow(t, i);
 			break;
 		}
 		finish_statistics(&stat);
@@ -925,6 +967,12 @@ static void free_ah(struct thread_ctx *t, int i)
 		ibv_destroy_ah(t->u.ah_list[i]);
 }
 
+static void free_flow(struct thread_ctx *t, int i)
+{
+	if (t->flow_list[i])
+		ibv_destroy_flow(t->flow_list[i]);
+}
+
 static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t, int type)
 {
 	struct statistics stat = { 0 };
@@ -950,6 +998,9 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 		break;
 	case RTYPE_RQ_IND_TBL:
 		uverbs_type = UVERBS_OBJECT_RWQ_IND_TBL;
+		break;
+	case RTYPE_AH:
+		uverbs_type = UVERBS_OBJECT_AH;
 		break;
 	default:
 		ret = -EINVAL;
@@ -984,6 +1035,9 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 			break;
 		case RTYPE_RQ_IND_TBL:
 			ret = rdma_core_destroy_rwq_ind_tbl_by_handle(fd, handles[i]);
+			break;
+		case RTYPE_AH:
+			ret = rdma_core_destroy_ah_by_handle(fd, handles[i]);
 			break;
 		default:
 			ret = -EINVAL;
@@ -1040,6 +1094,11 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 			break;
 		case RTYPE_AH:
 			free_ah(t, i);
+			break;
+		case RTYPE_FLOW:
+			free_flow(t, i);
+			free_qp(t, i);
+			free_cq(t, i);
 			break;
 		}
 		finish_statistics(&stat);
