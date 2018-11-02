@@ -791,6 +791,9 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 	case RTYPE_PD:
 		uverbs_type = UVERBS_OBJECT_PD;
 		break;
+	case RTYPE_MW:
+		uverbs_type = UVERBS_OBJECT_MW;
+		break;
 	default:
 		ret = -EINVAL;
 		break;
@@ -815,6 +818,9 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 			break;
 		case RTYPE_PD:
 			ret = rdma_core_destroy_pd_by_handle(fd, handles[i]);
+			break;
+		case RTYPE_MW:
+			ret = rdma_core_destroy_mw_by_handle(fd, handles[i]);
 			break;
 		default:
 			ret = -EINVAL;

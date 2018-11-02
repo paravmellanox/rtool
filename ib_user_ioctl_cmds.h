@@ -180,4 +180,12 @@ enum uverbs_attrs_pd_destroy_ids {
 	UVERBS_ATTR_DESTROY_PD_HANDLE,
 };
 
+enum uverbs_methods_mw {
+	UVERBS_METHOD_MW_DESTROY,
+};
+
+enum uverbs_attrs_mw_destroy_ids {
+	UVERBS_ATTR_DESTROY_MW_HANDLE,
+};
+
 #endif

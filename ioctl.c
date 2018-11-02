@@ -143,7 +143,7 @@ int rdma_core_destroy_mr_by_handle(int fd, uint32_t handle)
 }
 
 /**
- * rdma_core_destroy_pd_by_handle - destroy mr by its handle.
+ * rdma_core_destroy_pd_by_handle - destroy pd by its handle.
  *
  * @fd:		file descriptor of the ucontext shared via fd sharing
  * @handle:	handle returned by rdma_core_get_obj_handles()
@@ -156,5 +156,22 @@ int rdma_core_destroy_pd_by_handle(int fd, uint32_t handle)
 	return rdma_core_destroy_obj_by_handle(fd, UVERBS_OBJECT_PD,
 					       UVERBS_METHOD_PD_DESTROY,
 					       UVERBS_ATTR_DESTROY_PD_HANDLE,
+					       handle);
+}
+
+/**
+ * rdma_core_destroy_mw_by_handle - destroy mw by its handle.
+ *
+ * @fd:		file descriptor of the ucontext shared via fd sharing
+ * @handle:	handle returned by rdma_core_get_obj_handles()
+ *
+ * rdma_core_destroy_mw_by_handle() destroys a MW by its handle.
+ * It returns 0 on success and failure error code otherwise.
+ */
+int rdma_core_destroy_mw_by_handle(int fd, uint32_t handle)
+{
+	return rdma_core_destroy_obj_by_handle(fd, UVERBS_OBJECT_MW,
+					       UVERBS_METHOD_MW_DESTROY,
+					       UVERBS_ATTR_DESTROY_MW_HANDLE,
 					       handle);
 }
