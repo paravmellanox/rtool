@@ -87,15 +87,18 @@ err:
 }
 
 /**
- * rdma_core_destroy_mr_by_handle - destroy mr by its handle.
+ * rdma_core_destroy_obj_by_handle - destroy obj by its handle.
  *
  * @fd:		file descriptor of the ucontext shared via fd sharing
  * @handle:	handle returned by rdma_core_get_obj_handles()
- *
- * rdma_core_destroy_mr() destroys a MR by its handle. It returns 0 on success
- * and failure error code otherwise.
+ * @type:	object type such as MR, PD, CQ etc
+ * @attr_id:	respective attribute id for the given object type
+ * rdma_core_destroy_mr_by_handle() destroys an object  by its handle.
+ * It returns 0 on success and failure error code otherwise.
  */
-int rdma_core_destroy_mr_by_handle(int fd, uint32_t handle)
+static int
+rdma_core_destroy_obj_by_handle(int fd, uint32_t type, uint32_t method,
+				uint32_t attr_id, uint32_t handle)
 {
 	struct cmd {
 		struct ib_uverbs_ioctl_hdr hdr;
@@ -105,13 +108,13 @@ int rdma_core_destroy_mr_by_handle(int fd, uint32_t handle)
 	struct cmd op = {
 		.hdr = {
 	       		.length = sizeof(op),
-	       		.object_id = UVERBS_OBJECT_MR,
-	       		.method_id = UVERBS_METHOD_MR_DESTROY,
+			.object_id = type,
+			.method_id = method,
 	       		.num_attrs = 1,
 	       		.driver_id = RDMA_DRIVER_MLX5,
 	       	},
 	         .attrs[0] = {
-	       		.attr_id = UVERBS_ATTR_DESTROY_MR_HANDLE,
+			.attr_id = attr_id,
 	       		.flags = UVERBS_ATTR_F_MANDATORY,
 	       		.data.data = handle,
 	       	},
@@ -122,4 +125,36 @@ int rdma_core_destroy_mr_by_handle(int fd, uint32_t handle)
 	return 0;
 }
 
+/**
+ * rdma_core_destroy_mr_by_handle - destroy mr by its handle.
+ *
+ * @fd:		file descriptor of the ucontext shared via fd sharing
+ * @handle:	handle returned by rdma_core_get_obj_handles()
+ *
+ * rdma_core_destroy_mr_by_handle() destroys a MR by its handle.
+ * It returns 0 on success and failure error code otherwise.
+ */
+int rdma_core_destroy_mr_by_handle(int fd, uint32_t handle)
+{
+	return rdma_core_destroy_obj_by_handle(fd, UVERBS_OBJECT_MR,
+					       UVERBS_METHOD_MR_DESTROY,
+					       UVERBS_ATTR_DESTROY_MR_HANDLE,
+					       handle);
+}
 
+/**
+ * rdma_core_destroy_pd_by_handle - destroy mr by its handle.
+ *
+ * @fd:		file descriptor of the ucontext shared via fd sharing
+ * @handle:	handle returned by rdma_core_get_obj_handles()
+ *
+ * rdma_core_destroy_pd_by_handle() destroys a PD by its handle.
+ * It returns 0 on success and failure error code otherwise.
+ */
+int rdma_core_destroy_pd_by_handle(int fd, uint32_t handle)
+{
+	return rdma_core_destroy_obj_by_handle(fd, UVERBS_OBJECT_PD,
+					       UVERBS_METHOD_PD_DESTROY,
+					       UVERBS_ATTR_DESTROY_PD_HANDLE,
+					       handle);
+}

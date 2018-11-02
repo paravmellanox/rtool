@@ -172,4 +172,12 @@ enum uverbs_attrs_info_handles_id {
 	UVERBS_ATTR_INFO_HANDLES_LIST,
 };
 
+enum uverbs_methods_pd {
+	UVERBS_METHOD_PD_DESTROY,
+};
+
+enum uverbs_attrs_pd_destroy_ids {
+	UVERBS_ATTR_DESTROY_PD_HANDLE,
+};
+
 #endif

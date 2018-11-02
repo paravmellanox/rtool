@@ -774,17 +774,33 @@ static void free_qp(struct thread_ctx *t, int i)
 		ibv_destroy_qp(t->qp_list[i]);
 }
 
-static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t)
+static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t, int type)
 {
 	struct statistics stat = { 0 };
 	uint32_t ret_count;
 	uint32_t *handles;
+	int uverbs_type;
 	uint32_t i;
-	int ret;
+	int ret = 0;
 	int fd;
 
+	switch (type) {
+	case RTYPE_MR:
+		uverbs_type = UVERBS_OBJECT_MR;
+		break;
+	case RTYPE_PD:
+		uverbs_type = UVERBS_OBJECT_PD;
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+	if (ret) {
+		printf("%s unsupported type\n", __func__);
+		return;
+	}
 	fd = ctx->context->cmd_fd;
-	ret = rdma_core_get_obj_handles(fd, ctx->count, UVERBS_OBJECT_MR,
+	ret = rdma_core_get_obj_handles(fd, ctx->count, uverbs_type,
 					&handles, &ret_count);
 	if (ret) {
 		printf("%s fail to get handles\n", __func__);
@@ -793,7 +809,16 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 
 	for (i = 0; i < ret_count; i++) {
 		start_statistics(&stat);
-		ret = rdma_core_destroy_mr_by_handle(fd, handles[i]);
+		switch (type) {
+		case RTYPE_MR:
+			ret = rdma_core_destroy_mr_by_handle(fd, handles[i]);
+			break;
+		case RTYPE_PD:
+			ret = rdma_core_destroy_pd_by_handle(fd, handles[i]);
+			break;
+		default:
+			ret = -EINVAL;
+		};
 		finish_statistics(&stat);
 		update_min(&stat, &t->free_stats);
 		update_max(&stat, &t->free_stats);
@@ -850,7 +875,7 @@ static void free_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 		return;
 
 	if (ctx->ioctl_destroy)
-		free_resources_ioctl(ctx, t);
+		free_resources_ioctl(ctx, t, type);
 	else
 		_free_resources(ctx, t, type);
 }
