@@ -74,6 +74,7 @@ struct thread_ctx {
 	struct ibv_comp_channel *cq_channel;
 	struct ibv_cq **cq_list;
 	struct ibv_qp **qp_list;
+	struct ibv_wq **wq_list;
 	struct time_stats alloc_stats;
 	struct time_stats free_stats;
 	long long issued;
@@ -159,7 +160,7 @@ static void usage(const char *argv0)
 	printf("  -f --fault               read page fault memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
 	printf("  -O --ioctl               destroy resource using ioctl method\n");
-	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd)\n");
+	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd, wq)\n");
 	printf("  -S --segfault            seg fault after registration\n");
 	printf("  -W --wait                Wait for user signal before resource creation and destroy\n");
 	printf("  -h                       display this help message\n");
@@ -518,6 +519,7 @@ enum resource_id {
 	RTYPE_CQ,
 	RTYPE_QP,
 	RTYPE_XRCD,
+	RTYPE_WQ,
 	RTYPE_MAX
 };
 
@@ -534,6 +536,7 @@ static const struct resource_info resource_types[] = {
 	{ RTYPE_QP, "qp", },
 	{ RTYPE_CQ, "cq", },
 	{ RTYPE_XRCD, "xrcd", },
+	{ RTYPE_WQ, "wq", },
 	{ -1, NULL, },
 };
 
@@ -559,7 +562,7 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 	int type;
 
 	type = check_resource_type(ctx->resource_type);
-	if (type == RTYPE_CQ || type == RTYPE_QP) {
+	if (type == RTYPE_CQ || type == RTYPE_QP || type == RTYPE_WQ) {
 		t->cq_list = calloc(ctx->count, sizeof(struct ibv_cq*));
 		if (!t->cq_list) {
 			fprintf(stderr, "Couldn't allocate cq list memory\n");
@@ -570,6 +573,13 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 		t->qp_list = calloc(ctx->count, sizeof(struct ibv_qp*));
 		if (!t->qp_list) {
 			fprintf(stderr, "Couldn't allocate qp list memory\n");
+			return -ENOMEM;
+		}
+		return 0;
+	} else if (type == RTYPE_WQ) {
+		t->wq_list = calloc(ctx->count, sizeof(struct ibv_wq*));
+		if (!t->wq_list) {
+			fprintf(stderr, "Couldn't allocate wq list memory\n");
 			return -ENOMEM;
 		}
 		return 0;
@@ -711,6 +721,28 @@ static int alloc_xrcd(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return err;
 }
 
+static int alloc_wq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
+{
+	struct ibv_wq_init_attr wq_attr = { 0 };
+	int err = 0;
+
+	wq_attr.wq_context = NULL;
+	wq_attr.wq_type = IBV_WQT_RQ;
+	wq_attr.max_wr = 1;
+	wq_attr.max_sge = 1;
+	wq_attr.pd = ctx->pd;
+	wq_attr.cq = t->cq_list[i];
+	wq_attr.comp_mask = 0;
+	wq_attr.create_flags = IBV_WQ_INIT_ATTR_FLAGS;
+
+	t->wq_list[i] = ibv_create_wq(ctx->context, &wq_attr);
+	if (!t->wq_list[i]) {
+		fprintf(stderr, "Registered WQ count = %d\n", i);
+		err = -ENOMEM;
+	}
+	return err;
+}
+
 static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	struct statistics stat = { 0 };
@@ -748,6 +780,12 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 			break;
 		case RTYPE_XRCD:
 			err = alloc_xrcd(ctx, t, i);
+			break;
+		case RTYPE_WQ:
+			err = alloc_cq(ctx, t, i);
+			if (err)
+				break;
+			err = alloc_wq(ctx, t, i);
 			break;
 		}
 		finish_statistics(&stat);
@@ -801,6 +839,12 @@ static void free_xrcd(struct thread_ctx *t, int i)
 {
 	if (t->u.xrcd_list[i])
 		ibv_close_xrcd(t->u.xrcd_list[i]);
+}
+
+static void free_wq(struct thread_ctx *t, int i)
+{
+	if (t->wq_list[i])
+		ibv_destroy_wq(t->wq_list[i]);
 }
 
 static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t, int type)
@@ -900,6 +944,10 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 			break;
 		case RTYPE_XRCD:
 			free_xrcd(t, i);
+			break;
+		case RTYPE_WQ:
+			free_wq(t, i);
+			free_cq(t, i);
 			break;
 		}
 		finish_statistics(&stat);
