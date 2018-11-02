@@ -1002,6 +1002,9 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 	case RTYPE_AH:
 		uverbs_type = UVERBS_OBJECT_AH;
 		break;
+	case RTYPE_FLOW:
+		uverbs_type = UVERBS_OBJECT_FLOW;
+		break;
 	default:
 		ret = -EINVAL;
 		break;
@@ -1038,6 +1041,9 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 			break;
 		case RTYPE_AH:
 			ret = rdma_core_destroy_ah_by_handle(fd, handles[i]);
+			break;
+		case RTYPE_FLOW:
+			ret = rdma_core_destroy_flow_by_handle(fd, handles[i]);
 			break;
 		default:
 			ret = -EINVAL;

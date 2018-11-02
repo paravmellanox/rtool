@@ -226,3 +226,20 @@ int rdma_core_destroy_ah_by_handle(int fd, uint32_t handle)
 					       UVERBS_ATTR_DESTROY_AH_HANDLE,
 					       handle);
 }
+
+/**
+ * rdma_core_destroy_flow_by_handle - destroy flow by its handle.
+ *
+ * @fd:		file descriptor of the ucontext shared via fd sharing
+ * @handle:	handle returned by rdma_core_get_obj_handles()
+ *
+ * rdma_core_destroy_flow_by_handle() destroys an FLOW by its handle.
+ * It returns 0 on success and failure error code otherwise.
+ */
+int rdma_core_destroy_flow_by_handle(int fd, uint32_t handle)
+{
+	return rdma_core_destroy_obj_by_handle(fd, UVERBS_OBJECT_FLOW,
+					       UVERBS_METHOD_FLOW_DESTROY,
+					       UVERBS_ATTR_DESTROY_FLOW_HANDLE,
+					       handle);
+}

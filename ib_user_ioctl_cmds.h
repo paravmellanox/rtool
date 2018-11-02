@@ -135,7 +135,7 @@ enum uverbs_attrs_reg_dm_mr_cmd_attr_ids {
 
 enum uverbs_methods_mr {
 	UVERBS_METHOD_DM_MR_REG,
-	UVERBS_METHOD_MR_DESTROY,
+	UVERBS_METHOD_MR_DESTROY = 2,
 };
 
 enum uverbs_attrs_mr_destroy_ids {
@@ -163,7 +163,7 @@ enum uverbs_methods_actions_counters_ops {
 };
 
 enum uverbs_methods_actions_device {
-	UVERBS_METHOD_INFO_HANDLES,
+	UVERBS_METHOD_INFO_HANDLES = 1,
 };
 
 enum uverbs_attrs_info_handles_id {
@@ -210,6 +210,14 @@ enum uverbs_methods_ah {
 
 enum uverbs_attrs_ah_destroy_ids {
 	UVERBS_ATTR_DESTROY_AH_HANDLE,
+};
+
+enum uverbs_methods_flow {
+	UVERBS_METHOD_FLOW_DESTROY,
+};
+
+enum uverbs_attrs_flow_destroy_ids {
+	UVERBS_ATTR_DESTROY_FLOW_HANDLE,
 };
 
 #endif
