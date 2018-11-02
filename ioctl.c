@@ -175,3 +175,20 @@ int rdma_core_destroy_mw_by_handle(int fd, uint32_t handle)
 					       UVERBS_ATTR_DESTROY_MW_HANDLE,
 					       handle);
 }
+
+/**
+ * rdma_core_destroy_xrcd_by_handle - destroy xrcd by its handle.
+ *
+ * @fd:		file descriptor of the ucontext shared via fd sharing
+ * @handle:	handle returned by rdma_core_get_obj_handles()
+ *
+ * rdma_core_destroy_xrcd_by_handle() destroys a XRCD by its handle.
+ * It returns 0 on success and failure error code otherwise.
+ */
+int rdma_core_destroy_xrcd_by_handle(int fd, uint32_t handle)
+{
+	return rdma_core_destroy_obj_by_handle(fd, UVERBS_OBJECT_XRCD,
+					       UVERBS_METHOD_XRCD_DESTROY,
+					       UVERBS_ATTR_DESTROY_XRCD_HANDLE,
+					       handle);
+}

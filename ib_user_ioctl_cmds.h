@@ -188,4 +188,12 @@ enum uverbs_attrs_mw_destroy_ids {
 	UVERBS_ATTR_DESTROY_MW_HANDLE,
 };
 
+enum uverbs_methods_xrcd {
+	UVERBS_METHOD_XRCD_DESTROY,
+};
+
+enum uverbs_attrs_xrcd_destroy_ids {
+	UVERBS_ATTR_DESTROY_XRCD_HANDLE,
+};
+
 #endif
