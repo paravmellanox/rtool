@@ -5,7 +5,7 @@ PREFIX=/usr/local
 BINDIR=$(PREFIX)/bin
 MAN1DIR=$(PREFIX)/share/man/man1
 
-MR_LAT_SRCS=resource_lat.c options.c
+MR_LAT_SRCS=resource_lat.c options.c ioctl.c
 MR_LAT_OBJS=$(MR_LAT_SRCS:.c=.o)
 MR_LAT_BINARY=rdma_resource_lat
 RDMA_IO_SRCS=rdmaio.c options.c

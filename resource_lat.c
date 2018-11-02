@@ -47,6 +47,7 @@
 #include <unistd.h>
 
 #include "options.h"
+#include "ioctl.h"
 
 static pthread_barrier_t run_barrier;
 
@@ -113,6 +114,7 @@ struct run_ctx {
 	int threads;
 	int write_pattern;
 	int drop_ipc_lock_cap;
+	int ioctl_destroy;
 	int segfault;
 	int wait;
 	int report_interval;
@@ -154,6 +156,7 @@ static void usage(const char *argv0)
 	printf("  -L --lock                lock memory before registration\n");
 	printf("  -f --fault               read page fault memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
+	printf("  -O --ioctl               destroy resource using ioctl method\n");
 	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp)\n");
 	printf("  -S --segfault            seg fault after registration\n");
 	printf("  -W --wait                Wait for user signal before resource creation and destroy\n");
@@ -186,6 +189,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "lock",     .has_arg = 0, .val = 'L' },
 		{ .name = "fault",    .has_arg = 0, .val = 'f' },
 		{ .name = "drop_ipc", .has_arg = 0, .val = 'D' },
+		{ .name = "ioctl",    .has_arg = 0, .val = 'O' },
 		{ .name = "segfault", .has_arg = 0, .val = 'S' },
 		{ .name = "wait",     .has_arg = 0, .val = 'W' },
 		{ .name = "mmap",     .has_arg = 0, .val = 'm' },
@@ -198,7 +202,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:I:R:p:r:s:t:i:c:l:uoLfDSWmaA",
+	while ((opt = getopt_long(argc, argv, "hv:d:I:R:p:r:s:t:i:c:l:uoLfDOSWmaA",
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
@@ -272,6 +276,9 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'D':
 			ctx->drop_ipc_lock_cap = 1;
+			break;
+		case 'O':
+			ctx->ioctl_destroy = 1;
 			break;
 		case 'S':
 			ctx->segfault = 1;
@@ -766,19 +773,45 @@ static void free_qp(struct thread_ctx *t, int i)
 		ibv_destroy_qp(t->qp_list[i]);
 }
 
-static void free_resources(const struct run_ctx *ctx, struct thread_ctx *t)
+static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	struct statistics stat = { 0 };
-	int err;
-	int i;
+	uint32_t ret_count;
+	uint32_t *handles;
+	uint32_t i;
+	int ret;
+	int fd;
 
-	err = check_resource_type(ctx->resource_type);
-	if (err < 0)
+	fd = ctx->context->cmd_fd;
+	ret = rdma_core_get_mr_handles(fd, ctx->count, &handles, &ret_count);
+	if (ret) {
+		printf("%s fail to get handles\n", __func__);
 		return;
+	}
+
+	for (i = 0; i < ret_count; i++) {
+		start_statistics(&stat);
+		ret = rdma_core_destroy_mr_by_handle(fd, handles[i]);
+		finish_statistics(&stat);
+		update_min(&stat, &t->free_stats);
+		update_max(&stat, &t->free_stats);
+		update_avg(&stat, &t->free_stats);
+		if (ret) {
+			printf("%s i = %d handle = %d ret = %d\n", __func__, i, handles[i], ret);
+			break;
+		}
+		t->free_stats.count++;
+	}
+}
+
+static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int type)
+{
+	struct statistics stat = { 0 };
+	int i;
 
 	for (i = 0; i < ctx->count; i++) {
 		start_statistics(&stat);
-		switch (err) {
+		switch (type) {
 		case RTYPE_UCTX:
 			free_uctx(t, i);
 		case RTYPE_PD:
@@ -804,6 +837,20 @@ static void free_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 		update_avg(&stat, &t->free_stats);
 		t->free_stats.count++;
 	}
+}
+
+static void free_resources(const struct run_ctx *ctx, struct thread_ctx *t)
+{
+	int type;
+
+	type = check_resource_type(ctx->resource_type);
+	if (type < 0)
+		return;
+
+	if (ctx->ioctl_destroy)
+		free_resources_ioctl(ctx, t);
+	else
+		_free_resources(ctx, t, type);
 }
 
 static int do_thread_init(const struct run_ctx *ctx, struct thread_ctx *t_ctx)
