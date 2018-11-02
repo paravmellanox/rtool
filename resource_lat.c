@@ -69,6 +69,7 @@ struct thread_ctx {
 		struct ibv_pd **pd_list;
 		struct ibv_context **uctx_list;
 		struct ibv_mw **mw_list;
+		struct ibv_xrcd **xrcd_list;
 	} u;
 	struct ibv_comp_channel *cq_channel;
 	struct ibv_cq **cq_list;
@@ -158,7 +159,7 @@ static void usage(const char *argv0)
 	printf("  -f --fault               read page fault memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
 	printf("  -O --ioctl               destroy resource using ioctl method\n");
-	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp)\n");
+	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd)\n");
 	printf("  -S --segfault            seg fault after registration\n");
 	printf("  -W --wait                Wait for user signal before resource creation and destroy\n");
 	printf("  -h                       display this help message\n");
@@ -516,6 +517,7 @@ enum resource_id {
 	RTYPE_MW,
 	RTYPE_CQ,
 	RTYPE_QP,
+	RTYPE_XRCD,
 	RTYPE_MAX
 };
 
@@ -531,6 +533,7 @@ static const struct resource_info resource_types[] = {
 	{ RTYPE_MW, "mw", },
 	{ RTYPE_QP, "qp", },
 	{ RTYPE_CQ, "cq", },
+	{ RTYPE_XRCD, "xrcd", },
 	{ -1, NULL, },
 };
 
@@ -691,6 +694,23 @@ static int alloc_qp(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return err;
 }
 
+static int alloc_xrcd(const struct run_ctx *ctx, struct thread_ctx *t, int i)
+{
+	struct ibv_xrcd_init_attr xrcd_attr = { 0 };
+	int err = 0;
+
+	xrcd_attr.oflags = O_CREAT;
+	xrcd_attr.fd = -1;	/* we don't care for fd in resource test */
+	xrcd_attr.comp_mask = IBV_XRCD_INIT_ATTR_OFLAGS | IBV_XRCD_INIT_ATTR_FD;
+
+	t->u.xrcd_list[i] = ibv_open_xrcd(ctx->context, &xrcd_attr);
+	if (!t->u.xrcd_list[i]) {
+		fprintf(stderr, "Registered xrcd count = %d\n", i);
+		err = -ENOMEM;
+	}
+	return err;
+}
+
 static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	struct statistics stat = { 0 };
@@ -725,6 +745,9 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 			break;
 		case RTYPE_CQ:
 			err = alloc_cq(ctx, t, i);
+			break;
+		case RTYPE_XRCD:
+			err = alloc_xrcd(ctx, t, i);
 			break;
 		}
 		finish_statistics(&stat);
@@ -772,6 +795,12 @@ static void free_qp(struct thread_ctx *t, int i)
 {
 	if (t->qp_list[i])
 		ibv_destroy_qp(t->qp_list[i]);
+}
+
+static void free_xrcd(struct thread_ctx *t, int i)
+{
+	if (t->u.xrcd_list[i])
+		ibv_close_xrcd(t->u.xrcd_list[i]);
 }
 
 static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t, int type)
@@ -862,6 +891,9 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 		case RTYPE_QP:
 			free_qp(t, i);
 			free_cq(t, i);
+			break;
+		case RTYPE_XRCD:
+			free_xrcd(t, i);
 			break;
 		}
 		finish_statistics(&stat);
