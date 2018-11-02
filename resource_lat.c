@@ -70,6 +70,7 @@ struct thread_ctx {
 		struct ibv_context **uctx_list;
 		struct ibv_mw **mw_list;
 		struct ibv_xrcd **xrcd_list;
+		struct ibv_ah **ah_list;
 	} u;
 	struct ibv_comp_channel *cq_channel;
 	struct ibv_cq **cq_list;
@@ -85,6 +86,7 @@ struct run_ctx {
 	struct ibv_device *device;
 	struct ibv_context *context;
 	struct ibv_pd *pd;
+	union ibv_gid local_gid;
 
 	uint64_t size;
 	uint64_t mr_size;	/* mr_size and size are same if all MR
@@ -161,7 +163,7 @@ static void usage(const char *argv0)
 	printf("  -f --fault               read page fault memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
 	printf("  -O --ioctl               destroy resource using ioctl method\n");
-	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd, wq, rqit)\n");
+	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd, wq, rqit, ah)\n");
 	printf("  -S --segfault            seg fault after registration\n");
 	printf("  -W --wait                Wait for user signal before resource creation and destroy\n");
 	printf("  -h                       display this help message\n");
@@ -522,6 +524,7 @@ enum resource_id {
 	RTYPE_XRCD,
 	RTYPE_WQ,
 	RTYPE_RQ_IND_TBL,
+	RTYPE_AH,
 	RTYPE_MAX
 };
 
@@ -540,6 +543,7 @@ static const struct resource_info resource_types[] = {
 	{ RTYPE_XRCD, "xrcd", },
 	{ RTYPE_WQ, "wq", },
 	{ RTYPE_RQ_IND_TBL, "rqit", },
+	{ RTYPE_AH, "ah", },
 	{ -1, NULL, },
 };
 
@@ -775,6 +779,24 @@ static int alloc_rq_ind_tbl(const struct run_ctx *ctx, struct thread_ctx *t, int
 	return err;
 }
 
+static int alloc_ah(const struct run_ctx *ctx, struct thread_ctx *t, int i)
+{
+	struct ibv_ah_attr ah_attr;
+	int err = 0;
+
+	memset(&ah_attr, 0, sizeof(ah_attr));
+	ah_attr.port_num = 1;
+	ah_attr.is_global = 1;
+	ah_attr.grh.dgid = ctx->local_gid;
+
+	t->u.ah_list[i] = ibv_create_ah(ctx->pd, &ah_attr);
+	if (!t->u.ah_list[i]) {
+		fprintf(stderr, "created ah count = %d\n", i);
+		err = -ENOMEM;
+	}
+	return err;
+}
+
 static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 {
 	struct statistics stat = { 0 };
@@ -827,8 +849,10 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 			if (err)
 				break;
 			err = alloc_rq_ind_tbl(ctx, t, i);
-			if (err)
-				break;
+			break;
+		case RTYPE_AH:
+			err = alloc_ah(ctx, t, i);
+			break;
 		}
 		finish_statistics(&stat);
 		if (err)
@@ -893,6 +917,12 @@ static void free_rq_ind_tbl(struct thread_ctx *t, int i)
 {
 	if (t->rq_ind_tbl_list[i])
 		ibv_destroy_rwq_ind_table(t->rq_ind_tbl_list[i]);
+}
+
+static void free_ah(struct thread_ctx *t, int i)
+{
+	if (t->u.ah_list[i])
+		ibv_destroy_ah(t->u.ah_list[i]);
 }
 
 static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t, int type)
@@ -1008,6 +1038,9 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 			free_wq(t, i);
 			free_cq(t, i);
 			break;
+		case RTYPE_AH:
+			free_ah(t, i);
+			break;
 		}
 		finish_statistics(&stat);
 		update_min(&stat, &t->free_stats);
@@ -1106,6 +1139,8 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	ctx->access_flags = IBV_ACCESS_LOCAL_WRITE;
 	if (ctx->odp)
 		ctx->access_flags |= IBV_ACCESS_ON_DEMAND;
+
+	ibv_query_gid(ctx->context, 1, 0, &ctx->local_gid);
 
 	ctx->device = ib_dev;
 err:
