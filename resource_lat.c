@@ -702,7 +702,7 @@ static int alloc_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 			return -ENOMEM;
 		}
 	}
-	t->cq_list[i] = ibv_create_cq(ctx->context, 1024, NULL,
+	t->cq_list[i] = ibv_create_cq(ctx->context, 4, NULL,
 				      t->cq_channel, 0);
 	if (!t->cq_list[i]) {
 		printf("%s fail to create cq\n", __func__);
@@ -718,10 +718,10 @@ static int alloc_qp(const struct run_ctx *ctx, struct thread_ctx *t,
 	int err = 0;
 
 	qp_attr.send_cq = qp_attr.recv_cq = t->cq_list[i];
-	qp_attr.cap.max_send_wr = 128;
-	qp_attr.cap.max_recv_wr = 128;
-	qp_attr.cap.max_send_sge = 2;
-	qp_attr.cap.max_recv_sge = 2;
+	qp_attr.cap.max_send_wr = 4;
+	qp_attr.cap.max_recv_wr = 4;
+	qp_attr.cap.max_send_sge = 1;
+	qp_attr.cap.max_recv_sge = 1;
 	qp_attr.sq_sig_all = 1;
 	if (type == RTYPE_QP)
 		qp_attr.qp_type = IBV_QPT_RC;
