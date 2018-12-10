@@ -1070,6 +1070,7 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 		switch (type) {
 		case RTYPE_UCTX:
 			free_uctx(t, i);
+			break;
 		case RTYPE_PD:
 			free_pd(t, i);
 			break;
