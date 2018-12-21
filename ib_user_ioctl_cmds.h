@@ -135,7 +135,7 @@ enum uverbs_attrs_reg_dm_mr_cmd_attr_ids {
 
 enum uverbs_methods_mr {
 	UVERBS_METHOD_DM_MR_REG,
-	UVERBS_METHOD_MR_DESTROY = 2,
+	UVERBS_METHOD_MR_DESTROY,
 };
 
 enum uverbs_attrs_mr_destroy_ids {
