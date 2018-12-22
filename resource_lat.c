@@ -38,13 +38,12 @@
 #include <sys/time.h>
 #include <malloc.h>
 #include <inttypes.h>
-#include <infiniband/verbs.h>
-#include <sys/time.h>
 #include <sys/resource.h>
 #include <sys/mman.h>
 #include <sys/capability.h>
 #include <sys/types.h>
-#include <unistd.h>
+#include <infiniband/verbs.h>
+#include <rdma/rdma_cma.h>
 
 #include "options.h"
 #include "ioctl.h"
@@ -60,6 +59,16 @@ struct time_stats {
 	struct statistics total;
 	long long min, max, avg;
 	long long count;
+};
+
+struct rdma_connection {
+	struct rdma_cm_id *cm_id;	/* client id or server child id */
+};
+
+struct cm_ctx {
+	struct rdma_event_channel	*event_channel;
+	pthread_t			event_thread;
+	struct rdma_cm_event		*event;
 };
 
 struct thread_ctx {
@@ -78,6 +87,7 @@ struct thread_ctx {
 	struct ibv_wq **wq_list;
 	struct ibv_rwq_ind_table **rq_ind_tbl_list;
 	struct ibv_flow **flow_list;
+	struct rdma_connection *connections;
 	struct time_stats alloc_stats;
 	struct time_stats free_stats;
 	long long issued;
@@ -87,6 +97,7 @@ struct run_ctx {
 	struct ibv_device *device;
 	struct ibv_context *context;
 	struct ibv_pd *pd;
+	struct cm_ctx cm_ctx;
 	union ibv_gid local_gid;
 
 	uint64_t size;
@@ -164,7 +175,7 @@ static void usage(const char *argv0)
 	printf("  -f --fault               read page fault memory before registration\n");
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
 	printf("  -O --ioctl               destroy resource using ioctl method\n");
-	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd, wq, rqit, ah, flow)\n");
+	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd, wq, rqit, ah, flow, cmid)\n");
 	printf("  -S --segfault            seg fault after registration\n");
 	printf("  -W --wait                Wait for user signal before resource creation and destroy\n");
 	printf("  -h                       display this help message\n");
@@ -527,6 +538,7 @@ enum resource_id {
 	RTYPE_RQ_IND_TBL,
 	RTYPE_AH,
 	RTYPE_FLOW,
+	RTYPE_CM_ID,
 	RTYPE_MAX
 };
 
@@ -547,6 +559,7 @@ static const struct resource_info resource_types[] = {
 	{ RTYPE_RQ_IND_TBL, "rqit", },
 	{ RTYPE_AH, "ah", },
 	{ RTYPE_FLOW, "flow", },
+	{ RTYPE_CM_ID, "cmid", },
 	{ -1, NULL, },
 };
 
@@ -574,7 +587,7 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 	type = check_resource_type(ctx->resource_type);
 	if (type == RTYPE_CQ || type == RTYPE_QP ||
 	    type == RTYPE_WQ || type == RTYPE_RQ_IND_TBL ||
-	    type == RTYPE_FLOW) {
+	    type == RTYPE_FLOW || type == RTYPE_CM_ID) {
 		t->cq_list = calloc(ctx->count, sizeof(struct ibv_cq*));
 		if (!t->cq_list) {
 			fprintf(stderr, "Couldn't allocate cq list memory\n");
@@ -611,6 +624,12 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 			return 0;
 		}
 		return 0;
+	} else if (type == RTYPE_CM_ID) {
+		t->connections = calloc(ctx->count, sizeof(struct rdma_connection));
+		if (!t->connections) {
+			fprintf(stderr, "Couldn't allocate connections\n");
+			return -ENOMEM;
+		}
 	}
 
 	t->u.mr_list = calloc(ctx->count, sizeof(struct ibv_mr*));
@@ -810,6 +829,16 @@ static int alloc_ah(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return err;
 }
 
+static int alloc_cm_id(const struct run_ctx *ctx, struct thread_ctx *t, int i)
+{
+	int ret;
+
+	ret = rdma_create_id(ctx->cm_ctx.event_channel,
+			     &t->connections[i].cm_id, NULL,
+			     RDMA_PS_TCP);
+	return ret;
+}
+
 struct raw_eth_flow_attr {
 	struct ibv_flow_attr attr;
 	struct ibv_flow_spec_eth spec_eth;
@@ -895,6 +924,13 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 				break;
 			err = alloc_flow(t, i);
 			break;
+		case RTYPE_CM_ID:
+			err = alloc_cq(ctx, t, i);
+			if (err)
+				break;
+			err = alloc_cm_id(ctx, t, i);
+			if (err)
+				break;
 		}
 		finish_statistics(&stat);
 		if (err)
@@ -965,6 +1001,12 @@ static void free_ah(struct thread_ctx *t, int i)
 {
 	if (t->u.ah_list[i])
 		ibv_destroy_ah(t->u.ah_list[i]);
+}
+
+static void free_cm_id(struct thread_ctx *t, int i)
+{
+	if (t->connections[i].cm_id)
+		rdma_destroy_id(t->connections[i].cm_id);
 }
 
 static void free_flow(struct thread_ctx *t, int i)
@@ -1112,6 +1154,10 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 			free_qp(t, i);
 			free_cq(t, i);
 			break;
+		case RTYPE_CM_ID:
+			free_cm_id(t, i);
+			free_cq(t, i);
+			break;
 		}
 		finish_statistics(&stat);
 		update_min(&stat, &t->free_stats);
@@ -1177,6 +1223,77 @@ static void do_thread_cleanup(const struct run_ctx *ctx, struct thread_ctx *t_ct
 	free_mem(ctx, t_ctx);
 }
 
+static struct rdma_cm_event *cm_wait_for_event(struct run_ctx *ctx)
+{
+	int ret;
+
+	ret = rdma_get_cm_event(ctx->cm_ctx.event_channel, &ctx->cm_ctx.event);
+	if (ret) {
+		printf("%s null event.\n", __func__);
+		return NULL;
+	}
+
+	printf("rdmacm event: %s status = %d id = %p\n",
+		rdma_event_str(ctx->cm_ctx.event->event),
+		ctx->cm_ctx.event->status, ctx->cm_ctx.event->id);
+
+	#if 0
+	if (ctx->cm_ctx.event->event == RDMA_CM_EVENT_CONNECT_REQUEST ||
+	    ctx->cm_ctx.event->event == RDMA_CM_EVENT_ESTABLISHED) {
+		printf("listen_id = %p, id = %p\n",
+			ctx->cm_ctx.event->listen_id, ctx->cm_ctx.event->id);
+	}
+	#endif
+	return ctx->cm_ctx.event;
+}
+
+static void* cm_event_handler(void *arg)
+{
+	struct run_ctx *ctx = arg;
+	struct rdma_cm_event *event;
+
+	while (1) {
+		event = cm_wait_for_event(ctx);
+		rdma_ack_cm_event(event);
+	}
+	pthread_exit(NULL);
+	return NULL;
+}
+
+static void cleanup_rdma_cm_event_channel(struct run_ctx *ctx)
+{
+	if (ctx->cm_ctx.event_thread) {
+		pthread_cancel(ctx->cm_ctx.event_thread);
+		pthread_join(ctx->cm_ctx.event_thread, NULL);
+	}
+	if (ctx->cm_ctx.event_channel)
+		rdma_destroy_event_channel(ctx->cm_ctx.event_channel);
+}
+
+static void cleanup_test(struct run_ctx *ctx)
+{
+	cleanup_rdma_cm_event_channel(ctx);
+
+	if (ctx->pd)
+		ibv_dealloc_pd(ctx->pd);
+	if (ctx->context)
+		ibv_close_device(ctx->context);
+}
+
+static int setup_rdma_cm_event_channel(struct run_ctx *ctx)
+{
+	int err;
+
+	ctx->cm_ctx.event_channel = rdma_create_event_channel();
+
+	if (!ctx->cm_ctx.event_channel)
+		return -ENOMEM;
+
+	err = pthread_create(&ctx->cm_ctx.event_thread,
+		             NULL, &cm_event_handler, ctx);
+	return err;
+}
+
 static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 {
 	int err;
@@ -1214,6 +1331,8 @@ static int setup_test(struct run_ctx *ctx, struct ibv_device *ib_dev)
 	ibv_query_gid(ctx->context, 1, 0, &ctx->local_gid);
 
 	ctx->device = ib_dev;
+
+	err = setup_rdma_cm_event_channel(ctx);
 err:
 	return err;
 }
@@ -1230,14 +1349,6 @@ static void print_lat_stats(uint64_t size, struct time_stats *s, char *str)
 	printf(" avg="); print_time(s->avg); printf(",");
 	printf(" tot="); print_time(s->total.load_time);
 	printf("\n");
-}
-
-static void cleanup_test(struct run_ctx *ctx)
-{
-	if (ctx->pd)
-		ibv_dealloc_pd(ctx->pd);
-	if (ctx->context)
-		ibv_close_device(ctx->context);
 }
 
 static void check_for_segfault(const struct run_ctx *ctx)
