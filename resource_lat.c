@@ -177,7 +177,7 @@ static void usage(const char *argv0)
 	printf("  -D --drop_ipc_lock       drop ipc lock capability before registration\n");
 	printf("  -O --ioctl               destroy resource using ioctl method\n");
 	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd, wq, rqit, ah, flow, cmid)\n");
-	printf("  -S --segfault            seg fault after registration\n");
+	printf("  -F --segfault            seg fault after registration\n");
 	printf("  -W --wait                Wait for user signal before resource creation and destroy\n");
 	printf("  -h                       display this help message\n");
 	printf("  -v                       display program version\n");
@@ -209,7 +209,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "fault",    .has_arg = 0, .val = 'f' },
 		{ .name = "drop_ipc", .has_arg = 0, .val = 'D' },
 		{ .name = "ioctl",    .has_arg = 0, .val = 'O' },
-		{ .name = "segfault", .has_arg = 0, .val = 'S' },
+		{ .name = "segfault", .has_arg = 0, .val = 'F' },
 		{ .name = "wait",     .has_arg = 0, .val = 'W' },
 		{ .name = "mmap",     .has_arg = 0, .val = 'm' },
 		{ .name = NULL }
@@ -221,7 +221,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:I:R:p:r:s:t:i:c:l:uoLfDOSWmaA",
+	while ((opt = getopt_long(argc, argv, "hv:d:I:R:p:r:s:t:i:c:l:uoLfDOFWmaA",
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
@@ -299,7 +299,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		case 'O':
 			ctx->ioctl_destroy = 1;
 			break;
-		case 'S':
+		case 'F':
 			ctx->segfault = 1;
 			break;
 		case 'W':
