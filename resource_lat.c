@@ -58,6 +58,7 @@ struct statistics {
 struct time_stats {
 	struct statistics total;
 	long long min, max, avg;
+	long long total_load_time;
 	long long count;
 };
 
@@ -330,7 +331,7 @@ static void start_statistics(struct statistics *s)
 static void finish_statistics(struct statistics *s)
 {
 	s->finish = current_time();
-	s->load_time += s->finish - s->start;
+	s->load_time = s->finish - s->start;
 }
 
 static int config_hugetlb_pages(uint64_t num_hpages)
@@ -938,6 +939,7 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 		update_min(&stat, &t->alloc_stats);
 		update_max(&stat, &t->alloc_stats);
 		update_avg(&stat, &t->alloc_stats);
+		t->alloc_stats.total_load_time += stat.load_time;
 		t->alloc_stats.count++;
 	}
 	return err;
@@ -1103,6 +1105,7 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 			printf("%s i = %d handle = %d ret = %d\n", __func__, i, handles[i], ret);
 			break;
 		}
+		t->free_stats.total_load_time += stat.load_time;
 		t->free_stats.count++;
 	}
 }
@@ -1163,6 +1166,7 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 		update_min(&stat, &t->free_stats);
 		update_max(&stat, &t->free_stats);
 		update_avg(&stat, &t->free_stats);
+		t->free_stats.total_load_time += stat.load_time;
 		t->free_stats.count++;
 	}
 }
@@ -1347,7 +1351,7 @@ static void print_lat_stats(uint64_t size, struct time_stats *s, char *str)
 	printf(" min="); print_time(s->min); printf(",");
 	printf(" max="); print_time(s->max); printf(",");
 	printf(" avg="); print_time(s->avg); printf(",");
-	printf(" tot="); print_time(s->total.load_time);
+	printf(" tot="); print_time(s->total_load_time);
 	printf("\n");
 }
 
