@@ -1021,6 +1021,11 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 		return;
 	}
 
+	if (ret_count == 0) {
+		printf("%s no handles\n", __func__);
+		return;
+	}
+
 	for (i = 0; i < ret_count; i++) {
 		start_statistics(&stat);
 		switch (type) {
