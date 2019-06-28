@@ -81,17 +81,19 @@ struct rdma_connection {
 	struct ibv_comp_channel *cq_channel;
 	struct ibv_cq *cq;
 	struct ibv_pd *pd;
+	long cmd_count;
 
 	struct {
 		struct rdmaio_cmd *cmds;
 		struct rdmaio_rx_wr *wrs;
 		struct ibv_mr *cmds_mr;
-		int recv_cnt;
+		uint64_t recv_cnt;
 	} rx;
 	struct {
 		struct rdmaio_cmd *cmds;
 		struct rdmaio_tx_wr *wrs;
 		struct ibv_mr *cmds_mr;
+		uint64_t send_cnt;
 	} tx;
 	pthread_t cq_thread;
 	int id;
@@ -104,18 +106,20 @@ struct rdma_connection {
 struct rdmacm_client_ctx {
 	pthread_t cm_thread;
 	sem_t sem;
+	struct rdma_connection *q;
 };
 
 struct rdmacm_run_ctx {
 	struct rdma_event_channel *channel;
 	struct rdma_cm_event *event;
-	struct rdma_cm_id *listen_cm_id;
-
 	struct sockaddr_storage local_addr;
 
-	int next_free_client_index;
-	struct rdma_connection clients[128];
+	struct {
+		struct rdma_cm_id *listen_cm_id;
 
+		int next_free_client_index;
+		struct rdma_connection clients[128];
+	} s_ctx;
 	struct rdmacm_client_ctx c_ctx;
 };
 
@@ -510,7 +514,7 @@ static int create_q(struct rdma_connection *q)
 	}
 
 	q->cq = ibv_create_cq(q->cm_id->verbs,
-			      1023 * 2, q,
+			      RDMAIO_Q_DEPTH * 2, q,
 			      q->cq_channel,
 			      0);
 	if (!q->cq) {
@@ -526,9 +530,9 @@ static int create_q(struct rdma_connection *q)
 	qp_attr.recv_cq = q->cq;
 	qp_attr.qp_type = IBV_QPT_RC;
 	qp_attr.sq_sig_all = 1;
-	qp_attr.cap.max_send_wr = 1023;
+	qp_attr.cap.max_send_wr = RDMAIO_Q_DEPTH;
 	qp_attr.cap.max_send_sge = 1;
-	qp_attr.cap.max_recv_wr = 1023;
+	qp_attr.cap.max_recv_wr = RDMAIO_Q_DEPTH;
 	qp_attr.cap.max_recv_sge = 1;
 
 	ret = rdma_create_qp(q->cm_id, q->pd, &qp_attr);
@@ -562,14 +566,11 @@ static void init_rx_cmd_wrs(struct rdma_connection *q,
 	}
 }
 
-static int rdmaio_post_recv_wr(struct rdma_connection *q, int index)
+static int post_recv_wr(struct rdma_connection *q, int index)
 {
 	struct ibv_recv_wr *bad_wr;
-	int ret;
 
-	ret = ibv_post_recv(q->cm_id->qp, &q->rx.wrs[index].wr,
-			    &bad_wr);
-	return ret;
+	return ibv_post_recv(q->cm_id->qp, &q->rx.wrs[index].wr, &bad_wr);
 }
 
 static int
@@ -598,12 +599,21 @@ setup_rx_cmds_buffers(struct run_ctx *ctx, struct rdma_connection *q,
 	init_rx_cmd_wrs(q, cmd_size, cmd_count);
 
 	for (i = 0; i < cmd_count; i++) {
-		ret = rdmaio_post_recv_wr(q, i);
+		ret = post_recv_wr(q, i);
 		if (ret)
 			break;
 	}
 	printf("%s i= %d ret = %d\n", __func__, i, ret);
 	return ret;
+}
+
+static void server_recv_handler(struct rdma_connection *q)
+{
+	int index;
+
+	q->rx.recv_cnt++;
+	index =  q->rx.recv_cnt % RDMAIO_Q_DEPTH;
+	post_recv_wr(q, index);
 }
 
 static int server_cq_handler(struct rdma_connection *q)
@@ -630,7 +640,7 @@ static int server_cq_handler(struct rdma_connection *q)
 		case IBV_WC_RDMA_READ:
 			break;
 		case IBV_WC_RECV:
-			q->rx.recv_cnt++;
+			server_recv_handler(q);
 			break;
 		default:
 			printf("unknown completion status=%d opcode=%d\n",
@@ -695,11 +705,12 @@ static struct rdma_connection* alloc_q(struct run_ctx *ctx)
 	struct rdma_connection *q;
 	int free_idx;
 
-	free_idx = ctx->r_ctx.next_free_client_index;
+	free_idx = ctx->r_ctx.s_ctx.next_free_client_index;
 
-	q = &ctx->r_ctx.clients[free_idx];
+	q = &ctx->r_ctx.s_ctx.clients[free_idx];
 	q->id = free_idx;
-	ctx->r_ctx.next_free_client_index++;
+	q->cmd_count = RDMAIO_Q_DEPTH;
+	ctx->r_ctx.s_ctx.next_free_client_index++;
 	return q;
 }
 
@@ -779,8 +790,8 @@ static int setup_server(struct run_ctx *ctx)
 	struct rdma_cm_id *child_id;
 	int ret;
 
-	ret = rdma_create_id(ctx->r_ctx.channel, &ctx->r_ctx.listen_cm_id, NULL, 
-			     RDMA_PS_TCP);
+	ret = rdma_create_id(ctx->r_ctx.channel, &ctx->r_ctx.s_ctx.listen_cm_id,
+			     NULL, RDMA_PS_TCP);
 	if (ret)
 		return ret;
 
@@ -799,14 +810,15 @@ static int setup_server(struct run_ctx *ctx)
 		addr_in->sin_port = htons(ctx->port);
 	}
 
-	ret = rdma_bind_addr(ctx->r_ctx.listen_cm_id, (struct sockaddr *)addr_in);
+	ret = rdma_bind_addr(ctx->r_ctx.s_ctx.listen_cm_id,
+			     (struct sockaddr *)addr_in);
 	if (ret) {
 		perror("Fail to bind: ");
 		printf("err = %s\n", gai_strerror(ret));
 		return ret;
 	}
 
-	ret = rdma_listen(ctx->r_ctx.listen_cm_id, 1024);
+	ret = rdma_listen(ctx->r_ctx.s_ctx.listen_cm_id, 1024);
 	if (ret)
 		return ret;
 
@@ -949,13 +961,14 @@ static void init_tx_cmd_wrs(struct rdma_connection *q,
 	}
 }
 
-static int rdmaio_post_send_wr(struct rdma_connection *q, int index)
+static int client_post_send_wr(struct rdma_connection *q, int index)
 {
 	struct ibv_send_wr *bad_wr;
 	int ret;
 
-	ret = ibv_post_send(q->cm_id->qp, &q->tx.wrs[index].send_wr,
-			    &bad_wr);
+	ret = ibv_post_send(q->cm_id->qp, &q->tx.wrs[index].send_wr, &bad_wr);
+	if (!ret)
+		q->tx.send_cnt++;
 	return ret;
 }
 
@@ -978,24 +991,127 @@ static void setup_path_record(struct ibv_path_data *out,
 	out->path.preference = cached->preference;
 }
 
-static int client_send_cmds(struct run_ctx *ctx, struct rdma_connection *q,
+static void client_send_handler(struct rdma_connection *q)
+{
+	int index = q->tx.send_cnt % RDMAIO_Q_DEPTH;
+	int ret;
+
+	ret = client_post_send_wr(q, index);
+	if (ret)
+		printf("ret = %d\n", ret);
+}
+
+static int client_io_warmup(struct rdma_connection *q)
+{
+	int ret = 0;
+	int i;
+
+	for (i = 0; i < q->cmd_count; i++) {
+		ret = client_post_send_wr(q, i);
+		if (ret) {
+			printf("ret = %d\n", ret);
+			break;
+		}
+	}
+	return ret;
+}
+
+static int client_cq_handler(struct rdma_connection *q)
+{
+	struct ibv_wc wc;
+	int ret;
+
+	while (1) {
+		ret = ibv_poll_cq(q->cq, 1, &wc);
+		if (ret <= 0)
+			break;
+
+		if (wc.status) {
+			fprintf(stderr, "cqe status = %d\n", wc.status);
+			ret = -1;
+			goto err;
+		}
+
+		switch (wc.opcode) {
+		case IBV_WC_SEND:
+			client_send_handler(q);
+			break;
+		case IBV_WC_RDMA_WRITE:
+			break;
+		case IBV_WC_RDMA_READ:
+			break;
+		case IBV_WC_RECV:
+			break;
+		default:
+			printf("unknown completion status=%d opcode=%d\n",
+				wc.status, wc.opcode);
+			ret = -1;
+			goto err;
+		}
+	}
+	if (ret) {
+		fprintf(stderr, "cq poll error=%d\n", ret);
+		goto err;
+	}
+	return 0;
+
+err:
+	return ret;
+}
+
+static void *client_io_thread(void *arg)
+{
+	struct rdma_connection *q = arg;
+	struct ibv_cq *event_cq;
+	void *event_ctx;
+	int ret;
+
+	ret = client_io_warmup(q);
+	if (ret) {
+		fprintf(stderr, "Failed to post warmup io requests\n");
+		pthread_exit(NULL);
+	}
+
+	while (1) {
+		pthread_testcancel();
+
+		ret = ibv_get_cq_event(q->cq_channel, &event_cq, &event_ctx);
+		if (ret) {
+			fprintf(stderr, "Failed to get cq event.\n");
+			pthread_exit(NULL);
+		}
+		if (event_cq != q->cq) {
+			fprintf(stderr, "Invalid cq =%p\n", event_cq);
+			pthread_exit(NULL);
+		}
+		ret = ibv_req_notify_cq(q->cq, 0);
+		if (ret) {
+			fprintf(stderr, "fail to arm cq=%p\n", event_cq);
+			pthread_exit(NULL);
+		}
+		ret = client_cq_handler(q);
+		ibv_ack_cq_events(q->cq, 1);
+		if (ret)
+			pthread_exit(NULL);
+	}
+	return NULL;
+}
+
+static int setup_client_send_cmds(struct run_ctx *ctx, struct rdma_connection *q,
 			    int cmd_size, int cmd_count)
 {
 	int ret;
-	int i;
 
 	if (ctx->wait_time)
 		sleep(ctx->wait_time);
 
 	init_tx_cmd_wrs(q, cmd_size, cmd_count);
 
-	for (i = 0; i < cmd_count; i++) {
-		ret = rdmaio_post_send_wr(q, i);
-		if (ret)
-			break;
-	}
+	ret = pthread_create(&q->cq_thread, NULL, client_io_thread, q);
+	if (ret)
+		return ret;
 
-	printf("%s i= %d ret = %d\n", __func__, i, ret);
+	ctx->r_ctx.c_ctx.q = q;
 	return ret;
 }
 
@@ -1051,10 +1167,10 @@ static int client_setup_one_connection(struct run_ctx *ctx)
 	} else {
 		struct ibv_path_data path_record;
 		printf("num paths for first connection=%d\n",
-			ctx->r_ctx.clients[0].cm_id->route.num_paths);
+			ctx->r_ctx.s_ctx.clients[0].cm_id->route.num_paths);
 
 		setup_path_record(&path_record,
-				  &ctx->r_ctx.clients[0].cm_id->route.path_rec[0]);
+				  &ctx->r_ctx.s_ctx.clients[0].cm_id->route.path_rec[0]);
 
 		printf("%s setting options q = %p\n", __func__, q);
 
@@ -1099,8 +1215,8 @@ static int client_setup_one_connection(struct run_ctx *ctx)
 	if (ret)
 		return ret;
 
-	ret = client_send_cmds(ctx, q, sizeof(struct rdmaio_cmd),
-			       RDMAIO_Q_DEPTH);
+	ret = setup_client_send_cmds(ctx, q, sizeof(struct rdmaio_cmd),
+				     RDMAIO_Q_DEPTH);
 	return ret;
 }
 
@@ -1120,8 +1236,11 @@ static int setup_client(struct run_ctx *ctx)
 		if (ret)
 			break;
 	}
+	if (ret)
+		return ret;
 
-	return ret;
+	pthread_join(ctx->r_ctx.c_ctx.q->cq_thread, NULL);
+	return 0;
 }
 
 static int setup_test(struct run_ctx *ctx)
