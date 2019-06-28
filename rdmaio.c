@@ -47,8 +47,11 @@
 #include <netdb.h>
 #include <sys/resource.h>
 #include <sys/capability.h>
+#include<signal.h>
+#include<unistd.h>
 
 #include "options.h"
+#include "ts.h"
 
 #define RDMAIO_Q_DEPTH 1024
 
@@ -94,6 +97,9 @@ struct rdma_connection {
 		struct rdmaio_tx_wr *wrs;
 		struct ibv_mr *cmds_mr;
 		uint64_t send_cnt;
+		struct time_stats slat;
+		struct time_stats clat;
+		struct ts_time clat_ts;
 	} tx;
 	pthread_t cq_thread;
 	int id;
@@ -963,12 +969,17 @@ static void init_tx_cmd_wrs(struct rdma_connection *q,
 
 static int client_post_send_wr(struct rdma_connection *q, int index)
 {
+	struct ts_time sstat = { 0 };
 	struct ibv_send_wr *bad_wr;
 	int ret;
 
+	ts_log_start_time(&sstat);
 	ret = ibv_post_send(q->cm_id->qp, &q->tx.wrs[index].send_wr, &bad_wr);
 	if (!ret)
 		q->tx.send_cnt++;
+	ts_log_end_time(&sstat);
+	ts_update_time_stats(&sstat, &q->tx.slat);
+	ts_log_start_time(&q->tx.clat_ts);
 	return ret;
 }
 
@@ -996,6 +1007,8 @@ static void client_send_handler(struct rdma_connection *q)
 	int index = q->tx.send_cnt % RDMAIO_Q_DEPTH;
 	int ret;
 
+	ts_log_end_time(&q->tx.clat_ts);
+	ts_update_time_stats(&q->tx.clat_ts, &q->tx.clat);
 	ret = client_post_send_wr(q, index);
 	if (ret)
 		printf("ret = %d\n", ret);
@@ -1003,17 +1016,7 @@ static void client_send_handler(struct rdma_connection *q)
 
 static int client_io_warmup(struct rdma_connection *q)
 {
-	int ret = 0;
-	int i;
-
-	for (i = 0; i < q->cmd_count; i++) {
-		ret = client_post_send_wr(q, i);
-		if (ret) {
-			printf("ret = %d\n", ret);
-			break;
-		}
-	}
-	return ret;
+	return client_post_send_wr(q, 0);
 }
 
 static int client_cq_handler(struct rdma_connection *q)
@@ -1308,9 +1311,40 @@ static void cleanup_test(struct run_ctx *ctx)
 		free_mem(ctx);
 }
 
+static struct run_ctx *ctx;
+
+static void print_client_stats(void)
+{
+	printf("send cnt = %d\n", ctx->r_ctx.c_ctx.q->tx.send_cnt);
+	ts_print_lat_stats(&ctx->r_ctx.c_ctx.q->tx.slat, "slat");
+	ts_print_lat_stats(&ctx->r_ctx.c_ctx.q->tx.clat, "clat");
+}
+
+static void sig_int_handler(void)
+{
+	if (!ctx)
+		return;
+
+	if (!ctx->server) {
+		print_client_stats();
+	}
+}
+
+void sig_handler(int signo)
+{
+	switch (signo) {
+	case SIGINT:
+		sig_int_handler();
+		break;
+	default:
+		break;
+	};
+	exit(1);
+}
+
 int main(int argc, char **argv)
 {
-	struct run_ctx *ctx;
+	sighandler_t sig_err;
 	int err;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
@@ -1327,6 +1361,10 @@ int main(int argc, char **argv)
 	ctx->connections = 1;
 
 	parse_options(ctx, argc, argv);
+
+	sig_err = signal(SIGINT, sig_handler);
+	if (sig_err == SIG_ERR)
+		return -1;
 
 	err = setup_test(ctx);
 	if (err)

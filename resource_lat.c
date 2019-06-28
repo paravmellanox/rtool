@@ -48,19 +48,9 @@
 #include "options.h"
 #include "ioctl.h"
 #include "ib_user_ioctl_cmds.h"
+#include "ts.h"
 
 static pthread_barrier_t run_barrier;
-
-struct statistics {
-	long long start, finish, load_time;
-};
-
-struct time_stats {
-	struct statistics total;
-	long long min, max, avg;
-	long long total_load_time;
-	long long count;
-};
 
 struct rdma_connection {
 	struct rdma_cm_id *cm_id;	/* client id or server child id */
@@ -321,17 +311,6 @@ static void normalize_sizes(struct run_ctx *ctx)
 			ctx->step_size = 0;
 		}
 	}
-}
-
-static void start_statistics(struct statistics *s)
-{
-	s->start = current_time();
-}
-
-static void finish_statistics(struct statistics *s)
-{
-	s->finish = current_time();
-	s->load_time = s->finish - s->start;
 }
 
 static int config_hugetlb_pages(uint64_t num_hpages)
@@ -641,28 +620,6 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 	return 0;
 }
 
-static void update_min(const struct statistics *stat, struct time_stats *t)
-{
-	if (stat->load_time < t->min)
-		t->min = stat->load_time;
-}
-
-static void update_max(const struct statistics *stat, struct time_stats *t)
-{
-	if (stat->load_time > t->max)
-		t->max = stat->load_time;
-}
-
-static void update_avg(const struct statistics *stat,
-			   struct time_stats *t)
-{
-	long long avg = t->avg;
-	long long old_sum = avg * t->count;
-	long long new_avg = (old_sum + stat->load_time) / (t->count + 1);
-
-	t->avg = new_avg;
-}
-
 static int alloc_uctx(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
 	int err = 0;
@@ -862,7 +819,7 @@ static int alloc_flow(struct thread_ctx *t, int i)
 
 static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 {
-	struct statistics stat = { 0 };
+	struct ts_time stat = { 0 };
 	int err = 0;
 	int type;
 	int i;
@@ -872,7 +829,7 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 		return err;
 
 	for (i = 0; i < ctx->count; i++) {
-		start_statistics(&stat);
+		ts_log_start_time(&stat);
 		switch (type) {
 		case RTYPE_UCTX:
 			err = alloc_uctx(ctx, t, i);
@@ -933,14 +890,10 @@ static int allocate_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 			if (err)
 				break;
 		}
-		finish_statistics(&stat);
+		ts_log_end_time(&stat);
 		if (err)
 			break;
-		update_min(&stat, &t->alloc_stats);
-		update_max(&stat, &t->alloc_stats);
-		update_avg(&stat, &t->alloc_stats);
-		t->alloc_stats.total_load_time += stat.load_time;
-		t->alloc_stats.count++;
+		ts_update_time_stats(&stat, &t->alloc_stats);
 	}
 	return err;
 }
@@ -1019,7 +972,7 @@ static void free_flow(struct thread_ctx *t, int i)
 
 static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t, int type)
 {
-	struct statistics stat = { 0 };
+	struct ts_time stat = { 0 };
 	uint32_t ret_count;
 	uint32_t *handles;
 	int uverbs_type;
@@ -1071,7 +1024,7 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 	}
 
 	for (i = 0; i < ret_count; i++) {
-		start_statistics(&stat);
+		ts_log_start_time(&stat);
 		switch (type) {
 		case RTYPE_MR:
 			ret = rdma_core_destroy_mr_by_handle(fd, handles[i]);
@@ -1097,26 +1050,22 @@ static void free_resources_ioctl(const struct run_ctx *ctx, struct thread_ctx *t
 		default:
 			ret = -EINVAL;
 		};
-		finish_statistics(&stat);
-		update_min(&stat, &t->free_stats);
-		update_max(&stat, &t->free_stats);
-		update_avg(&stat, &t->free_stats);
+		ts_log_end_time(&stat);
+		ts_update_time_stats(&stat, &t->free_stats);
 		if (ret) {
 			printf("%s i = %d handle = %d ret = %d\n", __func__, i, handles[i], ret);
 			break;
 		}
-		t->free_stats.total_load_time += stat.load_time;
-		t->free_stats.count++;
 	}
 }
 
 static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int type)
 {
-	struct statistics stat = { 0 };
+	struct ts_time stat = { 0 };
 	int i;
 
 	for (i = 0; i < ctx->count; i++) {
-		start_statistics(&stat);
+		ts_log_start_time(&stat);
 		switch (type) {
 		case RTYPE_UCTX:
 			free_uctx(t, i);
@@ -1162,7 +1111,7 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 			free_cq(t, i);
 			break;
 		}
-		finish_statistics(&stat);
+		ts_log_end_time(&stat);
 		update_min(&stat, &t->free_stats);
 		update_max(&stat, &t->free_stats);
 		update_avg(&stat, &t->free_stats);
@@ -1343,16 +1292,9 @@ err:
 
 static void print_lat_stats(uint64_t size, struct time_stats *s, char *str)
 {
-	if (size) {
+	if (size)
 		printf("size: "); print_size(size); printf(" ");
-	}
-
-	printf("%s lat: ", str);
-	printf(" min="); print_time(s->min); printf(",");
-	printf(" max="); print_time(s->max); printf(",");
-	printf(" avg="); print_time(s->avg); printf(",");
-	printf(" tot="); print_time(s->total_load_time);
-	printf("\n");
+	ts_print_lat_stats(s, str);
 }
 
 static void check_for_segfault(const struct run_ctx *ctx)
@@ -1388,9 +1330,9 @@ static int do_one_test(const struct run_ctx *ctx, struct thread_ctx *t)
 
 	check_for_user_signal(ctx);
 
-	start_statistics(&t->alloc_stats.total);
+	ts_log_start_time(&t->alloc_stats.total);
 	err = allocate_resources(ctx, t);
-	finish_statistics(&t->alloc_stats.total);
+	ts_log_end_time(&t->alloc_stats.total);
 	if (err) {
 		fprintf(stderr, "Couldn't register resources\n");
 		goto cleanup;
@@ -1399,9 +1341,9 @@ static int do_one_test(const struct run_ctx *ctx, struct thread_ctx *t)
 	check_for_user_signal(ctx);
 	check_for_segfault(ctx);
 
-	start_statistics(&t->free_stats.total);
+	ts_log_start_time(&t->free_stats.total);
 	free_resources(ctx, t);
-	finish_statistics(&t->free_stats.total);
+	ts_log_end_time(&t->free_stats.total);
 	return 0;
 
 cleanup:
