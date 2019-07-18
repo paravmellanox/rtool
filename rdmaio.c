@@ -654,6 +654,7 @@ setup_rx_cmds_buffers(struct run_ctx *ctx, struct rdma_connection *q,
 				   ctx->access_flags);
 	if (!q->rx.cmds_mr)
 		return -ENOMEM;
+	printf("%s rx cmds mr key = 0x%x\n", __func__, q->rx.cmds_mr->lkey);
 
 	q->rx.wrs = calloc(msg_count, sizeof(*q->rx.wrs));
 	if (!q->rx.wrs)
@@ -686,6 +687,7 @@ setup_tx_cmds_buffers(struct run_ctx *ctx, struct rdma_connection *q,
 	if (!q->tx.cmds_mr)
 		return -ENOMEM;
 
+	printf("%s tx cmds mr key = 0x%x\n", __func__, q->tx.cmds_mr->lkey);
 
 	q->tx.wrs = calloc(msg_count, sizeof(*q->tx.wrs));
 	if (!q->tx.wrs)
@@ -762,6 +764,11 @@ static struct rdmaio_msg *get_tx_msg(const struct rdma_connection *q)
 	return q->tx.wrs[index].cmd;
 }
 
+static int get_rx_index(struct rdma_connection *q)
+{
+	return q->rx.recv_cnt % RDMAIO_Q_DEPTH;
+}
+
 /*
  * client-server ladder diagram:
  * client:			server:
@@ -795,6 +802,7 @@ static int client_si_ops_handler(struct rdma_connection *q)
 {
 	int ret = 0;
 
+restart_state:
 	switch (q->tx.si_state) {
 	case RDMAIO_CLIENT_STATE_START_IO:
 		ret = prepare_send_alloc_mr_req(q);
@@ -808,6 +816,7 @@ static int client_si_ops_handler(struct rdma_connection *q)
 		 * Restart the sequence.
 		 */
 		q->tx.si_state = RDMAIO_CLIENT_STATE_START_IO;
+		goto restart_state;
 		break;
 	default:
 		break;
@@ -856,26 +865,30 @@ client_recv_resp_handler(struct rdma_connection *q,
 			 const struct rdmaio_msg *msg)
 {
 	struct run_ctx *ctx = q->run_ctx;
+	int rx_index;
+	int tx_index;
 	int ret = 0;
-	int index;
 
-	index = get_tx_index(q);
+	rx_index = get_rx_index(q);
+	tx_index = get_tx_index(q);
+
 	if (ctx->si) {
-		q->tx.wrs[index].send_wr.invalidate_rkey =
+		q->tx.wrs[tx_index].send_wr.invalidate_rkey =
 						msg->u.alloc_mr_rsp.mr_key;
-		q->tx.wrs[index].send_wr.opcode = IBV_WR_SEND_WITH_INV;
+		q->tx.wrs[tx_index].send_wr.opcode = IBV_WR_SEND_WITH_INV;
 
-		ret = post_send_wr(q, index);
+		ret = post_send_wr(q, tx_index);
 		q->tx.si_state = RDMAIO_CLIENT_STATE_SI_SENT;
 		printf("%s mr len=%d, key=0x%x\n", __func__,
 			msg->u.alloc_mr_rsp.mr_len, msg->u.alloc_mr_rsp.mr_key);
 	} else {
-		q->tx.wrs[index].send_wr.opcode = IBV_WR_SEND;
-		ret = post_send_wr(q, index);
+		q->tx.wrs[tx_index].send_wr.opcode = IBV_WR_SEND;
+		ret = post_send_wr(q, tx_index);
 	}
+
 	if (ret)
 		printf("%s ret = %d\n", __func__, ret);
-
+	post_recv_wr(q, rx_index);
 }
 
 static void
@@ -939,11 +952,6 @@ static int client_io_handler(struct rdma_connection *q)
 
 err:
 	return ret;
-}
-
-static int get_rx_index(struct rdma_connection *q)
-{
-	return q->rx.recv_cnt % RDMAIO_Q_DEPTH;
 }
 
 static void
