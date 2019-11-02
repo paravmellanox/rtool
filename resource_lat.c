@@ -1115,7 +1115,7 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 		update_min(&stat, &t->free_stats);
 		update_max(&stat, &t->free_stats);
 		update_avg(&stat, &t->free_stats);
-		t->free_stats.total_load_time += stat.load_time;
+		t->free_stats.total_latency += stat.latency;
 		t->free_stats.count++;
 	}
 }
@@ -1143,12 +1143,8 @@ static int do_thread_init(const struct run_ctx *ctx, struct thread_ctx *t_ctx)
 		fprintf(stderr, "Couldn't allocate resource holding memory\n");
 		goto err;
 	}
-	t_ctx->alloc_stats.min = LLONG_MAX;
-	t_ctx->alloc_stats.max = LLONG_MIN;
-	t_ctx->alloc_stats.count = 0;
-	t_ctx->free_stats.min = LLONG_MAX;
-	t_ctx->free_stats.max = LLONG_MIN;
-	t_ctx->free_stats.count = 0;
+	ts_init(&t_ctx->alloc_stats);
+	ts_init(&t_ctx->free_stats);
 
 	err = alloc_mem(ctx, t_ctx);
 	if (err) {

@@ -118,6 +118,17 @@ enum rdmaio_si_state {
 	RDMAIO_CLIENT_STATE_MR_REQ_SENT,
 	RDMAIO_CLIENT_STATE_MR_RSP_RECV,
 	RDMAIO_CLIENT_STATE_SI_SENT,
+	RDMAIO_CLIENT_STATE_RW_SENT = RDMAIO_CLIENT_STATE_SI_SENT
+};
+
+struct rdma_rw_ctx {
+	struct ibv_mr *local_mr;
+	uint64_t length;	/* length of the IO can be lot smaller than
+				 * the MR length.
+				 */
+	/* address and rkey advertized by server */
+	uint64_t raddr;
+	uint32_t rkey;
 };
 
 struct rdma_connection {
@@ -130,7 +141,7 @@ struct rdma_connection {
 		struct rdmaio_msg *cmds;
 		struct rdmaio_rx_wr *wrs;
 		struct ibv_mr *cmds_mr;
-		uint64_t recv_cnt;
+		uint64_t rqe_post_cnt;
 		struct ibv_mr *io_mr;
 	} rx;
 	struct {
@@ -157,6 +168,7 @@ struct rdmacm_client_ctx {
 	pthread_t cm_thread;
 	sem_t sem;
 	struct rdma_connection *q;
+	struct rdma_rw_ctx rw_ctx;
 };
 
 struct rdmacm_run_ctx {
@@ -187,6 +199,8 @@ struct run_ctx {
 	int huge;
 	int odp;
 	int si;	/* Send with invalidate test */
+	int read; /* Read test, mutually exclusive with SI test */
+	int write; /* Write test, mutually exclusive with SI test */
 	int write_pattern;
 	char pattern;
 	int server;
@@ -274,6 +288,8 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "count",    .has_arg = 1, .val = 'n' },
 		{ .name = "server",   .has_arg = 0, .val = 's' },
 		{ .name = "sendinvalidate",   .has_arg = 0, .val = 'I' },
+		{ .name = "rdmaread",   .has_arg = 0, .val = 'R' },
+		{ .name = "rdmawrite",   .has_arg = 0, .val = 'W' },
 		{ .name = "client",   .has_arg = 1, .val = '0' },
 		{ .name = "connections",   .has_arg = 1, .val = 'C' },
 		{ .name = "huge",     .has_arg = 0, .val = 'u' },
@@ -291,7 +307,7 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:P:S:a:B:C:p:r:w:n:f:l:juoscID", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "hv:d:P:S:a:B:C:p:r:w:n:f:l:juoscIRWD", long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
 			version(argv[0]);
@@ -339,6 +355,12 @@ void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'I':
 			ctx->si = 1;
+			break;
+		case 'R':
+			ctx->read = 1;
+			break;
+		case 'W':
+			ctx->write = 1;
 			break;
 		case 'j':
 			ctx->skip_route_resolve = 1;
@@ -419,7 +441,7 @@ static int alloc_mem(struct run_ctx *ctx)
 	if (ctx->huge) {
 		err = config_hugetlb_kernel(ctx);
 		if (err) {
-			printf("fail to configure hugetlb\n");
+			fprintf(stderr,"fail to configure hugetlb\n");
 			err = -EINVAL;
 			return err;
 		}
@@ -457,17 +479,17 @@ static struct rdma_cm_event *wait_for_event(struct run_ctx *ctx)
 
 	ret = rdma_get_cm_event(ctx->r_ctx.channel, &ctx->r_ctx.event);
 	if (ret) {
-		printf("%s null event.\n", __func__);
+		fprintf(stderr,"%s null event.\n", __func__);
 		return NULL;
 	}
 
-	printf("rdmacm event: %s status = %d id = %p\n",
+	fprintf(stderr,"rdmacm event: %s status = %d id = %p\n",
 		rdma_event_str(ctx->r_ctx.event->event),
 		ctx->r_ctx.event->status, ctx->r_ctx.event->id);
 
 	if (ctx->r_ctx.event->event == RDMA_CM_EVENT_CONNECT_REQUEST ||
 	    ctx->r_ctx.event->event == RDMA_CM_EVENT_ESTABLISHED) {
-		printf("listen_id = %p, id = %p\n",
+		fprintf(stderr,"listen_id = %p, id = %p\n",
 			ctx->r_ctx.event->listen_id, ctx->r_ctx.event->id);
 	}
 	return ctx->r_ctx.event;
@@ -559,13 +581,13 @@ static int create_q(struct rdma_connection *q)
 
 	q->pd = ibv_alloc_pd(q->cm_id->verbs);
 	if (!q->pd) {
-		printf("%s fail to create pd\n", __func__);
+		fprintf(stderr,"%s fail to create pd\n", __func__);
 		return -ENOMEM;
 	}
 
 	q->cq_channel = ibv_create_comp_channel(q->cm_id->verbs);
 	if (!q->cq_channel) {
-		printf("%s fail to create cq channel\n", __func__);
+		fprintf(stderr,"%s fail to create cq channel\n", __func__);
 		return -ENOMEM;
 	}
 
@@ -574,7 +596,7 @@ static int create_q(struct rdma_connection *q)
 			      q->cq_channel,
 			      0);
 	if (!q->cq) {
-		printf("%s fail to create cq\n", __func__);
+		fprintf(stderr,"%s fail to create cq\n", __func__);
 		return -ENOMEM;
 	}
 	ret = ibv_req_notify_cq(q->cq, 0);
@@ -593,7 +615,7 @@ static int create_q(struct rdma_connection *q)
 
 	ret = rdma_create_qp(q->cm_id, q->pd, &qp_attr);
 	if (ret) {
-		printf("%s fail to create qp ret = %d\n", __func__, ret);
+		fprintf(stderr,"%s fail to create qp ret = %d\n", __func__, ret);
 		goto err;
 	}
 	return ret;
@@ -610,8 +632,8 @@ static void init_rx_cmd_wrs(struct rdma_connection *q,
 {
 	int i;
 
-	printf("%s rx_msg size = %d, count = %d\n", __func__,
-	       rx_msg_size, rx_msg_count);
+	fprintf(stderr,"%s rx_msg size = %d, count = %d\n", __func__,
+		rx_msg_size, rx_msg_count);
 
 	for (i = 0; i < rx_msg_count; i++) {
 		q->rx.wrs[i].cmd = &q->rx.cmds[i];
@@ -632,7 +654,7 @@ static int post_recv_wr(struct rdma_connection *q, int index)
 
 	ret = ibv_post_recv(q->cm_id->qp, &q->rx.wrs[index].wr, &bad_wr);
 	if (!ret)
-		q->rx.recv_cnt++;
+		q->rx.rqe_post_cnt++;
 	return ret;
 }
 
@@ -654,7 +676,7 @@ setup_rx_cmds_buffers(struct run_ctx *ctx, struct rdma_connection *q,
 				   ctx->access_flags);
 	if (!q->rx.cmds_mr)
 		return -ENOMEM;
-	printf("%s rx cmds mr key = 0x%x\n", __func__, q->rx.cmds_mr->lkey);
+	fprintf(stdout,"%s rx cmds mr lkey = 0x%x\n", __func__, q->rx.cmds_mr->lkey);
 
 	q->rx.wrs = calloc(msg_count, sizeof(*q->rx.wrs));
 	if (!q->rx.wrs)
@@ -667,7 +689,7 @@ setup_rx_cmds_buffers(struct run_ctx *ctx, struct rdma_connection *q,
 		if (ret)
 			break;
 	}
-	printf("%s i= %d ret = %d\n", __func__, i, ret);
+	fprintf(stdout,"%s i= %d ret = %d\n", __func__, i, ret);
 	return ret;
 }
 
@@ -687,7 +709,7 @@ setup_tx_cmds_buffers(struct run_ctx *ctx, struct rdma_connection *q,
 	if (!q->tx.cmds_mr)
 		return -ENOMEM;
 
-	printf("%s tx cmds mr key = 0x%x\n", __func__, q->tx.cmds_mr->lkey);
+	fprintf(stdout,"%s tx cmds mr key = 0x%x\n", __func__, q->tx.cmds_mr->lkey);
 
 	q->tx.wrs = calloc(msg_count, sizeof(*q->tx.wrs));
 	if (!q->tx.wrs)
@@ -701,7 +723,7 @@ static void init_tx_cmd_wrs(struct rdma_connection *q,
 {
 	int i;
 
-	printf("%s tx msg_size = %d, count = %d\n", __func__,
+	fprintf(stdout,"%s tx msg_size = %d, count = %d\n", __func__,
 		msg_size, msg_count);
 
 	for (i = 0; i < msg_count; i++) {
@@ -736,22 +758,6 @@ static int setup_msg_buffers(struct run_ctx *ctx, struct rdma_connection *q)
 	return 0;
 }
 
-static int post_send_wr(struct rdma_connection *q, int index)
-{
-	struct ts_time sstat = { 0 };
-	struct ibv_send_wr *bad_wr;
-	int ret;
-
-	ts_log_start_time(&sstat);
-	ret = ibv_post_send(q->cm_id->qp, &q->tx.wrs[index].send_wr, &bad_wr);
-	if (!ret)
-		q->tx.send_cnt++;
-	ts_log_end_time(&sstat);
-	ts_update_time_stats(&sstat, &q->tx.slat);
-	ts_log_start_time(&q->tx.clat_ts);
-	return ret;
-}
-
 static int get_tx_index(const struct rdma_connection *q)
 {
 	return q->tx.send_cnt % RDMAIO_Q_DEPTH;
@@ -764,9 +770,63 @@ static struct rdmaio_msg *get_tx_msg(const struct rdma_connection *q)
 	return q->tx.wrs[index].cmd;
 }
 
+static struct ibv_send_wr *get_tx_wr(const struct rdma_connection *q)
+{
+	int index = get_tx_index(q);
+
+	return &q->tx.wrs[index].send_wr;
+}
+
 static int get_rx_index(struct rdma_connection *q)
 {
-	return q->rx.recv_cnt % RDMAIO_Q_DEPTH;
+	return q->rx.rqe_post_cnt % RDMAIO_Q_DEPTH;
+}
+
+static int post_sq_wr(struct rdma_connection *q, struct ibv_send_wr *sq_wr)
+{
+	struct ts_time sstat = { 0 };
+	struct ibv_send_wr *bad_wr;
+	int ret;
+
+	ts_log_start_time(&sstat);
+	ret = ibv_post_send(q->cm_id->qp, sq_wr, &bad_wr);
+	if (!ret)
+		q->tx.send_cnt++;
+	else
+		fprintf(stderr,"%s sq opcode = %d, ret = %d\n", __func__,
+		       sq_wr->opcode, ret);
+	ts_log_end_time(&sstat);
+	ts_update_time_stats(&sstat, &q->tx.slat);
+	ts_log_start_time(&q->tx.clat_ts);
+	return ret;
+}
+
+static int post_rdma_wr(struct rdma_connection *q)
+{
+	struct ibv_send_wr *rdma_wr = get_tx_wr(q);
+	struct ibv_sge sge;
+
+	memset(rdma_wr, 0, sizeof(*rdma_wr));
+	memset(&sge, 0, sizeof(sge));
+
+	if (q->run_ctx->read)
+		rdma_wr->opcode = IBV_WR_RDMA_READ;
+	else if (q->run_ctx->write)
+		rdma_wr->opcode = IBV_WR_RDMA_WRITE;
+
+	if (q->run_ctx->r_ctx.c_ctx.rw_ctx.length) {
+		rdma_wr->wr.rdma.rkey = q->run_ctx->r_ctx.c_ctx.rw_ctx.rkey;
+		rdma_wr->wr.rdma.remote_addr = q->run_ctx->r_ctx.c_ctx.rw_ctx.raddr;
+		rdma_wr->num_sge = 1;
+		rdma_wr->sg_list = &sge;
+	}
+	rdma_wr->send_flags = IBV_SEND_SIGNALED;
+
+	sge.addr = (uintptr_t)q->run_ctx->r_ctx.c_ctx.rw_ctx.local_mr->addr;
+	sge.length = q->run_ctx->r_ctx.c_ctx.rw_ctx.length;
+	sge.lkey = q->run_ctx->r_ctx.c_ctx.rw_ctx.local_mr->lkey;
+
+	return post_sq_wr(q, rdma_wr);
 }
 
 /*
@@ -784,18 +844,16 @@ static int get_rx_index(struct rdma_connection *q)
 
 static int prepare_send_alloc_mr_req(struct rdma_connection *q)
 {
+	struct ibv_send_wr *tx_wr = get_tx_wr(q);
 	struct rdmaio_msg *msg = get_tx_msg(q);
-	int index = get_tx_index(q);
-	int ret;
 
 	msg->cmd_or_rsp = RDMAIO_CMD;
 	msg->opc = RDMA_IO_OPC_REG_MR_REQ;
 	msg->io_handle = (uintptr_t)msg;
-	msg->u.alloc_mr_cmd.mr_len = 4096;
+	msg->u.alloc_mr_cmd.mr_len = q->run_ctx->size;
 
-	q->tx.wrs[index].send_wr.opcode = IBV_WR_SEND;
-	ret = post_send_wr(q, index);
-	return ret;
+	tx_wr->opcode = IBV_WR_SEND;
+	return post_sq_wr(q, tx_wr);
 }
 
 static int client_si_ops_handler(struct rdma_connection *q)
@@ -827,36 +885,74 @@ restart_state:
 static void client_send_handler(struct rdma_connection *q)
 {
 	struct run_ctx *ctx = q->run_ctx;
-	int index = get_tx_index(q);
-	int ret;
+	struct ibv_send_wr *tx_wr = get_tx_wr(q);
+	int ret = 0;
 
 	ts_log_end_time(&q->tx.clat_ts);
 	ts_update_time_stats(&q->tx.clat_ts, &q->tx.clat);
 
-	if (ctx->si)
+	if (ctx->si) {
 		ret = client_si_ops_handler(q);
-	else {
-		q->tx.wrs[index].send_wr.opcode = IBV_WR_SEND;
-		ret = post_send_wr(q, index);
+	} else if (ctx->read || ctx->write) {
+		/* nop */
+	} else {
+		tx_wr->opcode = IBV_WR_SEND;
+		ret = post_sq_wr(q, tx_wr);
 	}
 	if (ret)
-		printf("ret = %d\n", ret);
+		fprintf(stderr,"%s ret = %d\n", __func__, ret);
+}
+
+static void client_rw_handler(struct rdma_connection *q)
+{
+	ts_log_end_time(&q->tx.clat_ts);
+	ts_update_time_stats(&q->tx.clat_ts, &q->tx.clat);
+	post_rdma_wr(q);
+}
+
+static int client_setup_rw_buffer(struct rdma_connection *q)
+{
+	struct run_ctx *ctx = q->run_ctx;
+	size_t length = q->run_ctx->size;
+	struct ibv_mr *mr;
+	void *buffer;
+
+	if (!ctx->read && !ctx->write)
+		return 0;
+
+	buffer = malloc(length);
+	if (!buffer)
+		return -ENOMEM;
+
+	mr = ibv_reg_mr(q->pd, buffer, length,
+			IBV_ACCESS_LOCAL_WRITE |
+			IBV_ACCESS_REMOTE_READ |
+			IBV_ACCESS_REMOTE_WRITE);
+	if (!mr)
+		return -ENOMEM;
+
+	ctx->r_ctx.c_ctx.rw_ctx.local_mr = mr;
+	ctx->r_ctx.c_ctx.rw_ctx.length = 0;
+	return 0;
 }
 
 static int client_io_warmup(struct rdma_connection *q)
 {
 	struct run_ctx *ctx = q->run_ctx;
-	int index = get_tx_index(q);
+	struct ibv_send_wr *tx_wr = get_tx_wr(q);
 	int ret;
 
 	if (ctx->si)
 		ret = client_si_ops_handler(q);
-	else {
-		q->tx.wrs[index].send_wr.opcode = IBV_WR_SEND;
-		ret = post_send_wr(q, index);
+	else if (ctx->read || ctx->write) {
+		ret = prepare_send_alloc_mr_req(q);
+		q->tx.si_state = RDMAIO_CLIENT_STATE_MR_REQ_SENT;
+	} else {
+		tx_wr->opcode = IBV_WR_SEND;
+		ret = post_sq_wr(q, tx_wr);
 	}
 	if (ret)
-		printf("ret = %d\n", ret);
+		fprintf(stderr,"ret = %d\n", ret);
 	return ret;
 }
 
@@ -865,29 +961,37 @@ client_recv_resp_handler(struct rdma_connection *q,
 			 const struct rdmaio_msg *msg)
 {
 	struct run_ctx *ctx = q->run_ctx;
+	struct ibv_send_wr *tx_wr = get_tx_wr(q);
 	int rx_index;
-	int tx_index;
 	int ret = 0;
 
 	rx_index = get_rx_index(q);
-	tx_index = get_tx_index(q);
 
 	if (ctx->si) {
-		q->tx.wrs[tx_index].send_wr.invalidate_rkey =
-						msg->u.alloc_mr_rsp.mr_key;
-		q->tx.wrs[tx_index].send_wr.opcode = IBV_WR_SEND_WITH_INV;
+		tx_wr->invalidate_rkey = msg->u.alloc_mr_rsp.mr_key;
+		tx_wr->opcode = IBV_WR_SEND_WITH_INV;
 
-		ret = post_send_wr(q, tx_index);
+		ret = post_sq_wr(q, tx_wr);
 		q->tx.si_state = RDMAIO_CLIENT_STATE_SI_SENT;
-		printf("%s mr len=%d, key=0x%x\n", __func__,
+
+		fprintf(stdout,"%s mr len=%d, key=0x%x\n", __func__,
 			msg->u.alloc_mr_rsp.mr_len, msg->u.alloc_mr_rsp.mr_key);
+	} else if (ctx->read || ctx->write) {
+		fprintf(stdout,"%s mr len=%d, key=0x%x\n", __func__,
+			msg->u.alloc_mr_rsp.mr_len, msg->u.alloc_mr_rsp.mr_key);
+		q->run_ctx->r_ctx.c_ctx.rw_ctx.raddr = msg->u.alloc_mr_rsp.addr;
+		q->run_ctx->r_ctx.c_ctx.rw_ctx.rkey = msg->u.alloc_mr_rsp.mr_key;
+
+		ret = post_rdma_wr(q);
+
+		q->tx.si_state = RDMAIO_CLIENT_STATE_RW_SENT;
 	} else {
-		q->tx.wrs[tx_index].send_wr.opcode = IBV_WR_SEND;
-		ret = post_send_wr(q, tx_index);
+		tx_wr->opcode = IBV_WR_SEND;
+		ret = post_sq_wr(q, tx_wr);
 	}
 
 	if (ret)
-		printf("%s ret = %d\n", __func__, ret);
+		fprintf(stderr,"%s ret = %d\n", __func__, ret);
 	post_recv_wr(q, rx_index);
 }
 
@@ -908,57 +1012,50 @@ client_recv_wc_handler(struct rdma_connection *q, struct ibv_wc *wc)
 static int client_io_handler(struct rdma_connection *q)
 {
 	struct ibv_wc wc;
-	int ret;
+	int ret = 0;
 
-	while (1) {
-		ret = ibv_poll_cq(q->cq, 1, &wc);
-		if (ret <= 0)
-			break;
+	ret = ibv_poll_cq(q->cq, 1, &wc);
+	if (ret <= 0)
+		return ret;
 
+	fprintf(stdout, "cqe opcode = %d, status = %d %s\n",
+		wc.opcode, wc.status,
+		ibv_wc_status_str(wc.status));
+	if (wc.status) {
 		fprintf(stderr, "cqe opcode = %d, status = %d %s\n",
 			wc.opcode, wc.status,
 			ibv_wc_status_str(wc.status));
-		if (wc.status) {
-			fprintf(stderr, "cqe opcode = %d, status = %d %s\n",
-				wc.opcode, wc.status,
-				ibv_wc_status_str(wc.status));
-			ret = -1;
-			goto err;
-		}
-
-		switch (wc.opcode) {
-		case IBV_WC_SEND:
-			client_send_handler(q);
-			break;
-		case IBV_WC_RDMA_WRITE:
-			break;
-		case IBV_WC_RDMA_READ:
-			break;
-		case IBV_WC_RECV:
-			client_recv_wc_handler(q, &wc);
-			break;
-		default:
-			printf("unknown completion status=%d opcode=%d\n",
-				wc.status, wc.opcode);
-			ret = -1;
-			goto err;
-		}
+		return -1;
 	}
-	if (ret) {
-		fprintf(stderr, "cq poll error=%d\n", ret);
-		goto err;
-	}
-	return 0;
 
-err:
+	switch (wc.opcode) {
+	case IBV_WC_SEND:
+		client_send_handler(q);
+		break;
+	case IBV_WC_RDMA_WRITE:
+	case IBV_WC_RDMA_READ:
+		client_rw_handler(q);
+		break;
+	case IBV_WC_RECV:
+		client_recv_wc_handler(q, &wc);
+		break;
+	default:
+		fprintf(stderr,"unknown completion status=%d opcode=%d\n",
+			wc.status, wc.opcode);
+		ret = -1;
+		break;
+	}
+	if (ret < 0)
+		fprintf(stderr, "%s cq poll error=%d\n", __func__, ret);
 	return ret;
 }
 
 static void
-server_si_reg_mr_handler(struct rdma_connection *q,
+server_reg_mr_handler(struct rdma_connection *q,
 			 const struct rdmaio_msg *msg, int index)
 {
 	struct rdmaio_msg *mr_rsp = get_tx_msg(q);
+	struct ibv_send_wr *tx_wr = get_tx_wr(q);
 	struct ibv_mr *mr;
 	void *buffer;
 
@@ -977,23 +1074,22 @@ server_si_reg_mr_handler(struct rdma_connection *q,
 	mr_rsp->u.alloc_mr_rsp.mr_key = mr->rkey;
 	mr_rsp->u.alloc_mr_rsp.addr = (uintptr_t)buffer;
 	
-	printf("%s mr len=%d, key=0x%x, addr=%p\n", __func__,
+	fprintf(stdout,"%s mr len=%d, key=0x%x, addr=%p\n", __func__,
 		msg->u.alloc_mr_cmd.mr_len, mr->rkey, buffer);
 
 	post_recv_wr(q, index);
 
-	index = get_tx_index(q);
-	q->tx.wrs[index].send_wr.opcode = IBV_WR_SEND;
-	post_send_wr(q, index);
+	tx_wr->opcode = IBV_WR_SEND;
+	post_sq_wr(q, tx_wr);
 }
 
 static void
-server_si_cmd_handler(struct rdma_connection *q,
+server_cmd_handler(struct rdma_connection *q,
 		      const struct rdmaio_msg *msg, int index)
 {
 	switch (msg->opc) {
 	case RDMA_IO_OPC_REG_MR_REQ:
-		server_si_reg_mr_handler(q, msg, index);
+		server_reg_mr_handler(q, msg, index);
 		break;
 	};
 }
@@ -1006,7 +1102,7 @@ server_recv_cqe_handler(struct rdma_connection *q, const struct ibv_wc *wc,
 
 	switch (msg->cmd_or_rsp) {
 	case RDMAIO_CMD:
-		server_si_cmd_handler(q, msg, index);
+		server_cmd_handler(q, msg, index);
 		break;
 	default:
 		break;
@@ -1028,7 +1124,7 @@ static void server_receiver(struct rdma_connection *q,
 
 	index = get_rx_index(q);
 
-	if (ctx->si) {
+	if (ctx->si || ctx->read || ctx->write) {
 		if (wc->wc_flags & IBV_WC_WITH_INV)
 			server_si_recv_cqe_handler(q, index);
 		else
@@ -1070,7 +1166,7 @@ static int server_io_handler(struct rdma_connection *q)
 			server_receiver(q, &wc);
 			break;
 		default:
-			printf("unknown completion status=%d opcode=%d\n",
+			fprintf(stderr,"unknown completion status=%d opcode=%d\n",
 				wc.status, wc.opcode);
 			ret = -1;
 			goto err;
@@ -1086,32 +1182,53 @@ err:
 	return ret;
 }
 
-static int thread_loop(struct rdma_connection *q)
+static void wait_for_cqe_event(struct rdma_connection *q)
 {
+
 	struct ibv_cq *event_cq;
 	void *event_ctx;
+	int ret = 0;
+
+	ret = ibv_get_cq_event(q->cq_channel, &event_cq, &event_ctx);
+	if (ret) {
+		fprintf(stderr, "Failed to get cq event.\n");
+		pthread_exit(NULL);
+	}
+	if (event_cq != q->cq) {
+		fprintf(stderr, "Invalid cq =%p\n", event_cq);
+		pthread_exit(NULL);
+	}
+	ret = ibv_req_notify_cq(q->cq, 0);
+	if (ret) {
+		fprintf(stderr, "fail to arm cq=%p\n", event_cq);
+		pthread_exit(NULL);
+	}
+}
+
+static int io_allowed(struct rdma_connection *q)
+{
+	if (q->run_ctx->count > q->tx.send_cnt)
+		return 1;
+
+	return 0;
+}
+
+static int thread_loop(struct rdma_connection *q)
+{
 	int ret = 0;
 
 	while (1) {
 		pthread_testcancel();
 
-		ret = ibv_get_cq_event(q->cq_channel, &event_cq, &event_ctx);
-		if (ret) {
-			fprintf(stderr, "Failed to get cq event.\n");
+		if (!io_allowed(q))
 			pthread_exit(NULL);
-		}
-		if (event_cq != q->cq) {
-			fprintf(stderr, "Invalid cq =%p\n", event_cq);
-			pthread_exit(NULL);
-		}
-		ret = ibv_req_notify_cq(q->cq, 0);
-		if (ret) {
-			fprintf(stderr, "fail to arm cq=%p\n", event_cq);
-			pthread_exit(NULL);
-		}
+
+		wait_for_cqe_event(q);
+
 		ret = q->io_handler(q);
+
 		ibv_ack_cq_events(q->cq, 1);
-		if (ret)
+		if (ret < 0)
 			pthread_exit(NULL);
 	}
 	return ret;
@@ -1135,6 +1252,11 @@ static void *client_io_thread(void *arg)
 	struct rdma_connection *q = arg;
 	int ret;
 
+	ret = client_setup_rw_buffer(q);
+	if (ret) {
+		fprintf(stderr, "Failed to post warmup io requests\n");
+		pthread_exit(NULL);
+	}
 	ret = client_io_warmup(q);
 	if (ret) {
 		fprintf(stderr, "Failed to post warmup io requests\n");
@@ -1170,6 +1292,8 @@ static struct rdma_connection* alloc_q(struct run_ctx *ctx,
 	ctx->r_ctx.s_ctx.next_free_client_index++;
 	q->run_ctx = ctx;
 	q->io_handler = io_handler;
+	ts_init(&q->tx.slat);
+	ts_init(&q->tx.clat);
 	return q;
 }
 
@@ -1181,22 +1305,23 @@ static int server_handle_connect(struct run_ctx *ctx,
 	char resp[20] = { 0 };
 	int ret;
 
-	printf("%s allocating q memory\n", __func__);
+	fprintf(stdout,"%s allocating q memory\n", __func__);
 	q = alloc_q(ctx, server_io_handler);
 	if (!q)
 		return -EINVAL;
 
-	printf("%s creating q id = %p\n", __func__, child_id);
+	fprintf(stdout,"%s creating q id = %p\n", __func__, child_id);
 	q->cm_id = child_id;
 	q->cm_id->context = q;
 	ret = create_q(q);
 	if (ret)
 		return ret;
 
-	printf("%s done creating qp = %p\n", __func__, child_id);
+	fprintf(stdout,"%s qp = %d\n", __func__, q->cm_id->qp->qp_num);
 	param.rnr_retry_count = 7;
 	param.flow_control = 1;
-	param.initiator_depth = 1;
+	param.initiator_depth = 16;
+	param.responder_resources = 16;
 	param.private_data = &resp[0];
 	param.private_data_len = sizeof(resp);
 
@@ -1204,17 +1329,18 @@ static int server_handle_connect(struct run_ctx *ctx,
 	if (ret)
 		goto err;
 
-	printf("%s done accepting connection = %p\n", __func__, child_id);
+	fprintf(stdout,"%s accepted connection = %p\n", __func__, child_id);
 	ret = setup_msg_buffers(ctx, q);
 	if (ret)
 		goto err;
 
-	printf("%s done setup msg buffers = %p\n", __func__, child_id);
+	fprintf(stdout,"%s completed msg buffers setup = %p\n",
+		__func__, child_id);
 	ret = server_start_io_thread(q);
 	if (ret)
 		goto io_err;
 
-	printf("%s io thread started = %p\n", __func__, child_id);
+	fprintf(stdout,"%s io thread started = %p\n", __func__, child_id);
 	return 0;
 
 io_err:
@@ -1234,7 +1360,8 @@ static int server_handle_disconnect(struct run_ctx *ctx,
 
 	q = child_id->context;
 
-	printf("%s q = %p, recv count = %d\n", __func__, q, q->rx.recv_cnt);
+	fprintf(stdout,"%s qpn = %d, rqe post count = %d\n", __func__,
+	       q->cm_id->qp->qp_num, q->rx.rqe_post_cnt);
 	return 0;
 }
 
@@ -1270,7 +1397,7 @@ static int setup_server(struct run_ctx *ctx)
 			     (struct sockaddr *)addr_in);
 	if (ret) {
 		perror("Fail to bind: ");
-		printf("err = %s\n", gai_strerror(ret));
+		fprintf(stdout,"err = %s\n", gai_strerror(ret));
 		return ret;
 	}
 
@@ -1302,7 +1429,7 @@ static int setup_server(struct run_ctx *ctx)
 		}
 	}
 
-	printf("%s status = %d\n", __func__, ret);
+	fprintf(stdout,"%s status = %d\n", __func__, ret);
 	return ret;
 }
 
@@ -1312,7 +1439,7 @@ static int rdmacm_client_cm_event_handler(struct rdma_cm_id *cm_id,
 	struct rdma_connection *q = cm_id->context;
 	struct rdmacm_client_ctx *c_ctx;
 
-	printf("%s q = %p\n", __func__, q);
+	fprintf(stdout,"%s q = %p\n", __func__, q);
 
 	c_ctx = q->c_ctx;
 
@@ -1435,7 +1562,7 @@ static int client_setup_one_connection(struct run_ctx *ctx)
 	 * for subsequent connections.
 	 */
 	if (!ctx->skip_route_resolve || !q->id) {
-		printf("%s resolving route q = %p\n", __func__, q);
+		fprintf(stdout,"%s resolving route q = %p\n", __func__, q);
 		ret = rdma_resolve_route(q->cm_id, 5000);
 		if (ret) {
 			q->state = RDMAIO_CM_FATAL_ERROR;
@@ -1443,44 +1570,44 @@ static int client_setup_one_connection(struct run_ctx *ctx)
 		}
 	} else {
 		struct ibv_path_data path_record;
-		printf("num paths for first connection=%d\n",
+		fprintf(stdout,"num paths for first connection=%d\n",
 			ctx->r_ctx.s_ctx.clients[0].cm_id->route.num_paths);
 
 		setup_path_record(&path_record,
 				  &ctx->r_ctx.s_ctx.clients[0].cm_id->route.path_rec[0]);
 
-		printf("%s setting options q = %p\n", __func__, q);
+		fprintf(stdout,"%s setting options q = %p\n", __func__, q);
 
 		ret = rdma_set_option(q->cm_id, RDMA_OPTION_IB,
 				      RDMA_OPTION_IB_PATH,
 				      &path_record,
 				      sizeof(path_record));
 		if (ret) {
-			printf("%s fail to set path record option ret = %d\n", __func__, ret);
+			fprintf(stderr,"%s fail to set path record option ret = %d\n", __func__, ret);
 			return ret;
 		}
 	}
 	sem_wait(&ctx->r_ctx.c_ctx.sem);
 	if (q->state != RDMAIO_CM_STATE_ROUTE_RESOLVED) {
-		printf("%s q = %p, state = %d\n", __func__, q, q->state);
+		fprintf(stderr,"%s q = %p, state = %d\n", __func__, q, q->state);
 		return -EINVAL;
 	}
 
-	printf("%s creating q =%p\n", __func__, q);
+	fprintf(stdout,"%s creating q =%p\n", __func__, q);
 	ret = create_q(q);
 	if (ret) {
-		printf("%s fail to create q = %d\n", __func__, ret);
+		fprintf(stderr,"%s fail to create q = %d\n", __func__, ret);
 		return ret;
 	}
 
 	memset(&conn_param, 0, sizeof(conn_param));
-	conn_param.responder_resources = 1;
-	conn_param.initiator_depth = 1;
+	conn_param.responder_resources = 16;
+	conn_param.initiator_depth = 16;
 	conn_param.retry_count = 7;
 
 	ret = rdma_connect(q->cm_id, &conn_param);
 	if (ret) {
-		printf("%s fail to connect ret = %d\n", __func__, ret);
+		fprintf(stderr,"%s fail to connect ret = %d\n", __func__, ret);
 		return ret;
 	}
 	sem_wait(&ctx->r_ctx.c_ctx.sem);
@@ -1561,18 +1688,18 @@ static int setup_test(struct run_ctx *ctx)
 			goto err;
 	}
 
-	printf("Configuration\n");
-	printf("size = ");
+	fprintf(stdout,"Configuration\n");
+	fprintf(stdout,"size = ");
 	print_size(ctx->size);
-	printf("\n");
-	printf("align = ");
+	fprintf(stdout,"\n");
+	fprintf(stdout,"align = ");
 	print_size(ctx->align);
-	printf("\n");
-	printf("count = ");
+	fprintf(stdout,"\n");
+	fprintf(stdout,"count = ");
 	print_size(ctx->count);
-	printf("\n");
-	printf("hugetlb = %s\n", ctx->huge ? "enabled" : "disabled");
-	printf("odp = %s\n", ctx->odp ? "enabled" : "disabled");
+	fprintf(stdout,"\n");
+	fprintf(stdout,"hugetlb = %s\n", ctx->huge ? "enabled" : "disabled");
+	fprintf(stdout,"odp = %s\n", ctx->odp ? "enabled" : "disabled");
 err:
 	return err;
 }
@@ -1587,19 +1714,15 @@ static struct run_ctx *ctx;
 
 static void print_client_stats(void)
 {
-	printf("send cnt = %d\n", ctx->r_ctx.c_ctx.q->tx.send_cnt);
+	fprintf(stdout,"send cnt = %d\n", ctx->r_ctx.c_ctx.q->tx.send_cnt);
 	ts_print_lat_stats(&ctx->r_ctx.c_ctx.q->tx.slat, "slat");
 	ts_print_lat_stats(&ctx->r_ctx.c_ctx.q->tx.clat, "clat");
 }
 
 static void sig_int_handler(void)
 {
-	if (!ctx)
-		return;
-
-	if (!ctx->server) {
+	if (ctx && !ctx->server)
 		print_client_stats();
-	}
 }
 
 void sig_handler(int signo)
@@ -1629,7 +1752,7 @@ int main(int argc, char **argv)
 	ctx->size = sysconf(_SC_PAGESIZE);
 	ctx->page_size = sysconf(_SC_PAGESIZE);
 	ctx->align = sysconf(_SC_PAGESIZE);
-	ctx->count = 1;
+	ctx->count = 1024;
 	ctx->connections = 1;
 
 	parse_options(ctx, argc, argv);
@@ -1643,6 +1766,8 @@ int main(int argc, char **argv)
 		goto err;
 
 	cleanup_test(ctx);
+
+	print_client_stats();
 	return 0;
 
 err:
