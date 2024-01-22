@@ -45,6 +45,6 @@ $ rdma_resource_lat -d mlx5_0 -R pd
 Authors
 -------
 
-* Parav Pandit <parav@mellanox.com>
+* Parav Pandit <parav@nvidia.com>
 
 Licensed under GPLv3 (or later) <http://www.gnu.org/licenses/gpl-3.0.txt>
