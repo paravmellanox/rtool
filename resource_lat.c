@@ -1288,8 +1288,9 @@ err:
 
 static void print_lat_stats(uint64_t size, struct time_stats *s, char *str)
 {
-	if (size)
+	if (size) {
 		printf("size: "); print_size(size); printf(" ");
+	}
 	ts_print_lat_stats(s, str);
 }
 

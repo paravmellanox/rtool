@@ -1515,7 +1515,7 @@ static void setup_path_record(struct ibv_path_data *out,
 	out->path.pkey = 0xffff;
 	out->path.mtu = (cached->mtu_selector << 6) | cached->mtu;
 	out->path.packetlifetime =
-		(cached->packet_life_time_selector << 6) || cached->packet_life_time;
+		(cached->packet_life_time_selector << 6) | cached->packet_life_time;
 	out->path.preference = cached->preference;
 }
 
