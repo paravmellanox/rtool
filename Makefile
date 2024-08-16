@@ -1,6 +1,6 @@
 CFLAGS ?= -g -ftree-vectorize -Wformat=0
 CFLAGS += -pedantic -std=gnu99 -Wall -Wextra
-LIBS=-lm -lrt -libverbs -lhugetlbfs -lrdmacm -lpthread -lcap
+LIBS=-lm -lrt -libverbs -lhugetlbfs -lrdmacm -lpthread -lcap -lmlx5
 PREFIX=/usr/local
 BINDIR=$(PREFIX)/bin
 MAN1DIR=$(PREFIX)/share/man/man1

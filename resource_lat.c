@@ -43,6 +43,7 @@
 #include <sys/capability.h>
 #include <sys/types.h>
 #include <infiniband/verbs.h>
+#include <infiniband/mlx5dv.h>
 #include <rdma/rdma_cma.h>
 
 #include "options.h"
@@ -74,6 +75,7 @@ struct thread_ctx {
 	} u;
 	struct ibv_comp_channel *cq_channel;
 	struct ibv_cq **cq_list;
+	struct mlx5dv_devx_obj **devx_cq_list;
 	struct ibv_qp **qp_list;
 	struct ibv_wq **wq_list;
 	struct ibv_rwq_ind_table **rq_ind_tbl_list;
@@ -127,6 +129,7 @@ struct run_ctx {
 	int segfault;
 	int wait;
 	int report_interval;
+	int devx;
 	char pattern;
 	char *ibdev_name;
 	char *resource_type;
@@ -168,6 +171,7 @@ static void usage(const char *argv0)
 	printf("  -O --ioctl               destroy resource using ioctl method\n");
 	printf("  -R --resource            resource type (pd, mr, uctx, mw, cq, qp, xrcd, wq, rqit, ah, flow, cmid)\n");
 	printf("  -F --segfault            seg fault after registration\n");
+	printf("  -x --devx                devx resource creation mode\n");
 	printf("  -W --wait                Wait for user signal before resource creation and destroy\n");
 	printf("  -h                       display this help message\n");
 	printf("  -v                       display program version\n");
@@ -200,6 +204,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		{ .name = "drop_ipc", .has_arg = 0, .val = 'D' },
 		{ .name = "ioctl",    .has_arg = 0, .val = 'O' },
 		{ .name = "segfault", .has_arg = 0, .val = 'F' },
+		{ .name = "devx",     .has_arg = 0, .val = 'x' },
 		{ .name = "wait",     .has_arg = 0, .val = 'W' },
 		{ .name = "mmap",     .has_arg = 0, .val = 'm' },
 		{ .name = NULL }
@@ -211,7 +216,7 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 		exit(1);
 	}
 
-	while ((opt = getopt_long(argc, argv, "hv:d:I:R:p:r:s:t:i:c:l:uoLfDOFWmaA",
+	while ((opt = getopt_long(argc, argv, "hv:d:I:R:p:r:s:t:i:c:l:uoLfDOFWmaAx",
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'v':
@@ -291,6 +296,9 @@ static void parse_options(struct run_ctx *ctx, int argc, char **argv)
 			break;
 		case 'F':
 			ctx->segfault = 1;
+			break;
+		case 'x':
+			ctx->devx = 1;
 			break;
 		case 'W':
 			ctx->wait = 1;
@@ -568,10 +576,18 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 	if (type == RTYPE_CQ || type == RTYPE_QP ||
 	    type == RTYPE_WQ || type == RTYPE_RQ_IND_TBL ||
 	    type == RTYPE_FLOW || type == RTYPE_CM_ID) {
-		t->cq_list = calloc(ctx->count, sizeof(struct ibv_cq*));
-		if (!t->cq_list) {
-			fprintf(stderr, "Couldn't allocate cq list memory\n");
-			return -ENOMEM;
+		if (ctx->devx) {
+			t->devx_cq_list = calloc(ctx->count, sizeof(struct mlx5dv_devx_obj *));
+			if (!t->devx_cq_list) {
+				fprintf(stderr, "Couldn't allocate devx cq list memory\n");
+				return -ENOMEM;
+			}
+		} else {
+			t->cq_list = calloc(ctx->count, sizeof(struct ibv_cq*));
+			if (!t->cq_list) {
+				fprintf(stderr, "Couldn't allocate cq list memory\n");
+				return -ENOMEM;
+			}
 		}
 	}
 	if (type == RTYPE_QP || type == RTYPE_FLOW) {
@@ -670,7 +686,183 @@ static int alloc_mw(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 	return err;
 }
 
-static int alloc_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
+struct mlx5_ifc_cqc_bits {
+	uint8_t status[0x4];
+	uint8_t as_notify[0x1];
+	uint8_t initiator_src_dct[0x1];
+	uint8_t dbr_umem_valid[0x1];
+	uint8_t additional_element[0x1];
+	uint8_t cqe_sz[0x3];
+	uint8_t cc[0x1];
+	uint8_t reserved_at_c[0x1];
+	uint8_t scqe_break_moderation_en[0x1];
+	uint8_t oi[0x1];
+	uint8_t cq_period_mode[0x2];
+	uint8_t cqe_comp_en[0x1];
+	uint8_t mini_cqe_res_format[0x2];
+	uint8_t st[0x4];
+	uint8_t always_armed_cq[0x1];
+	uint8_t element_type[0x3];
+	uint8_t reserved_at_1c[0x2];
+	uint8_t cqe_compression_layout[0x2];
+
+	uint8_t dbr_umem_id[0x20];
+
+	uint8_t reserved_at_40[0x14];
+	uint8_t page_offset[0x6];
+	uint8_t reserved_at_5a[0x2];
+	uint8_t mini_cqe_res_format_3_2[0x2];
+	uint8_t cq_time_stamp_format[0x2];
+
+	uint8_t reserved_at_60[0x3];
+	uint8_t log_cq_size[0x5];
+	uint8_t uar_page[0x18];
+
+	uint8_t reserved_at_80[0x4];
+	uint8_t cq_period[0xc];
+	uint8_t cq_max_count[0x10];
+
+	uint8_t c_eqn_or_add_element[0x20];
+
+	uint8_t reserved_at_c0[0x3];
+	uint8_t log_page_size[0x5];
+	uint8_t reserved_at_c8[0x18];
+
+	uint8_t reserved_at_e0[0x20];
+
+	uint8_t reserved_at_100[0x8];
+	uint8_t last_notified_index[0x18];
+
+	uint8_t reserved_at_120[0x8];
+	uint8_t last_solicit_index[0x18];
+
+	uint8_t reserved_at_140[0x8];
+	uint8_t consumer_counter[0x18];
+
+	uint8_t reserved_at_160[0x8];
+	uint8_t producer_counter[0x18];
+
+	uint8_t as_notify_params[0x40];
+
+	uint8_t dbr_addr[0x40];
+};
+
+struct mlx5_ifc_create_cq_out_bits {
+	uint8_t status[0x8];
+	uint8_t reserved_at_8[0x18];
+
+	uint8_t syndrome[0x20];
+
+	uint8_t reserved_at_40[0x8];
+	uint8_t cqn[0x18];
+
+	uint8_t reserved_at_60[0x20];
+};
+
+struct mlx5_ifc_create_cq_in_bits {
+	uint8_t opcode[0x10];
+	uint8_t uid[0x10];
+
+	uint8_t reserved_at_20[0x10];
+	uint8_t op_mod[0x10];
+
+	uint8_t reserved_at_40[0x8];
+	uint8_t input_cqn[0x18];
+
+	uint8_t reserved_at_60[0x20];
+
+	struct mlx5_ifc_cqc_bits cq_context;
+
+	uint8_t e_mtt_pointer_or_cq_umem_offset[0x40];
+
+	uint8_t cq_umem_id[0x20];
+
+	uint8_t cq_umem_valid[0x1];
+	uint8_t reserved_at_2e1[0x1f];
+
+	uint8_t reserved_at_300[0x580];
+
+	uint8_t pas[];
+};
+
+enum {
+	MLX5_CMD_OPCODE_CREATE_CQ = 0x400,
+
+};
+
+static int devx_alloc_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
+{
+	struct mlx5dv_devx_uar *uar;
+	struct mlx5dv_devx_umem *cq_dbr_umem;
+	struct mlx5dv_devx_umem *cq_umem;
+	uint32_t *cq_dbr; /* array of 2 be32 values */
+	void *cq_ring;
+	void *cqc;
+
+	uint32_t out[DEVX_ST_SZ_DW(create_cq_out)] = {0};
+	uint32_t in[DEVX_ST_SZ_DW(create_cq_in)] = {0};
+	uint32_t eq_num;
+	int err;
+
+	uar = mlx5dv_devx_alloc_uar(ctx->context, MLX5DV_UAR_ALLOC_TYPE_NC);
+
+        /* Initialize CQ */
+        cq_ring = memalign(getpagesize(), 4096);
+
+        cq_umem = mlx5dv_devx_umem_reg(ctx->context, cq_ring,
+				       4096, IBV_ACCESS_LOCAL_WRITE);
+        if (cq_umem == NULL) {
+		printf("Failed register CQ ring memory\n");
+                err = errno;
+                goto err_reg_ring;
+        }
+
+        cq_dbr = memalign(64, sizeof(uint64_t));
+        memset(cq_dbr, 0, sizeof(uint64_t));
+
+        cq_dbr_umem = mlx5dv_devx_umem_reg(ctx->context, cq_dbr, 64,
+					   IBV_ACCESS_LOCAL_WRITE);
+        if (cq_dbr_umem == NULL) {
+                printf("Failed to register host CQ DBR memory\n");
+                err = errno;
+                goto err_reg_dbr;
+        }
+
+	/* Get an EQ number */
+	err = mlx5dv_devx_query_eqn(ctx->context, 0, &eq_num);
+	if (err)
+		return err;
+
+        DEVX_SET(create_cq_in, in, opcode, MLX5_CMD_OPCODE_CREATE_CQ);
+        DEVX_SET64(create_cq_in, in, e_mtt_pointer_or_cq_umem_offset, 0);
+        DEVX_SET(create_cq_in, in, cq_umem_id, cq_umem->umem_id);
+	DEVX_SET(create_cq_in, in, cq_umem_valid, 1);
+
+        cqc = DEVX_ADDR_OF(create_cq_in, in, cq_context);
+        DEVX_SET(cqc, cqc, dbr_umem_id, cq_dbr_umem->umem_id);
+        DEVX_SET(cqc, cqc, log_cq_size, 5);
+        DEVX_SET(cqc, cqc, uar_page, uar->page_id);
+        DEVX_SET(cqc, cqc, c_eqn_or_add_element, eq_num);
+        DEVX_SET64(cqc, cqc, dbr_addr, (uintptr_t)cq_dbr);
+        DEVX_SET64(cqc, cqc, dbr_addr, (uintptr_t)0);
+
+	t->devx_cq_list[i] =
+		mlx5dv_devx_obj_create(ctx->context,
+				       in, sizeof(in), out, sizeof(out));
+	if (!t->devx_cq_list[i]) {
+		printf("fail to create devx cq errno = %d, %s\n",
+		       errno, strerror(errno));
+		return errno;
+	}
+	return 0;
+
+err_reg_dbr:
+err_reg_ring:
+	free(cq_ring);
+	return -ENOMEM;
+}
+
+static int ibv_alloc_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
 	if (!t->cq_channel) {
 		t->cq_channel = ibv_create_comp_channel(ctx->context);
@@ -686,6 +878,14 @@ static int alloc_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 		return -ENOMEM;
 	}
 	return 0;
+}
+
+static int alloc_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
+{
+	if (ctx->devx)
+		return devx_alloc_cq(ctx, t, i);
+	else
+		return ibv_alloc_cq(ctx, t, i);
 }
 
 static int alloc_qp(const struct run_ctx *ctx, struct thread_ctx *t,
@@ -924,8 +1124,10 @@ static void free_mw(struct thread_ctx *t, int i)
 
 static void free_cq(struct thread_ctx *t, int i)
 {
-	if (t->cq_list[i])
+	if (t->cq_list && t->cq_list[i])
 		ibv_destroy_cq(t->cq_list[i]);
+	else if (t->devx_cq_list && t->devx_cq_list[i])
+		mlx5dv_devx_obj_destroy(t->devx_cq_list[i]);
 }
 
 static void free_qp(struct thread_ctx *t, int i)
