@@ -794,9 +794,11 @@ enum {
 
 static int devx_alloc_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
-	struct mlx5dv_devx_uar *uar;
 	struct mlx5dv_devx_umem *cq_dbr_umem;
 	struct mlx5dv_devx_umem *cq_umem;
+	struct mlx5dv_devx_uar *uar;
+	struct mlx5dv_devx devx = {0};
+	struct mlx5dv_obj obj = {0};
 	uint32_t *cq_dbr; /* array of 2 be32 values */
 	void *cq_ring;
 	void *cqc;
@@ -856,8 +858,15 @@ static int devx_alloc_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 		       errno, strerror(errno));
 		return errno;
 	}
-	t->devx_cq_handle[i] = mlx5dv_devx_obj_handle_query(t->devx_cq_list[i]);
-	printf("val = 0x%x\n", t->devx_cq_handle[i]);
+
+	obj.devx.in = t->devx_cq_list[i];
+	obj.devx.out = &devx;
+
+	err = mlx5dv_init_obj(&obj, MLX5DV_OBJ_DEVX);
+	if (err)
+		return err;
+
+	t->devx_cq_handle[i] = devx.handle;
 	return 0;
 
 err_reg_dbr:
