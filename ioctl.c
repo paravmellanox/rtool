@@ -5,6 +5,7 @@
 
 #include "rdma_user_ioctl_cmds.h"
 #include "ib_user_ioctl_cmds.h"
+#include <rdma/mlx5_user_ioctl_cmds.h>
 
 static int get_object_handles(int fd, int obj_type, int max_count,
 			      uint32_t *handles,
@@ -242,4 +243,31 @@ int rdma_core_destroy_flow_by_handle(int fd, uint32_t handle)
 					       UVERBS_METHOD_FLOW_DESTROY,
 					       UVERBS_ATTR_DESTROY_FLOW_HANDLE,
 					       handle);
+}
+
+int mlx5_ioctl_devx_obj_destroy(int cmd_fd, uint32_t handle)
+{
+	struct cmd {
+		struct ib_uverbs_ioctl_hdr hdr;
+		struct ib_uverbs_attr attrs[1];
+	};
+
+	struct cmd op = {
+		.hdr = {
+			.length = sizeof(op),
+			.object_id = MLX5_IB_OBJECT_DEVX_OBJ,
+			.method_id = MLX5_IB_METHOD_DEVX_OBJ_DESTROY,
+			.num_attrs = 1,
+			.driver_id = RDMA_DRIVER_MLX5,
+		},
+	         .attrs[0] = {
+			.attr_id = MLX5_IB_ATTR_DEVX_OBJ_DESTROY_HANDLE,
+			.flags = UVERBS_ATTR_F_MANDATORY,
+			.data.data = handle,
+		},
+	};
+
+	if (ioctl(cmd_fd, RDMA_VERBS_IOCTL, &op))
+	         return errno;
+	return 0;
 }

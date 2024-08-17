@@ -1514,8 +1514,6 @@ static void setup_path_record(struct ibv_path_data *out,
 	out->path.reversible_numpath = (1 << 7) | 0x1; /* reversible-7:7 num path-6:0 */
 	out->path.pkey = 0xffff;
 	out->path.mtu = (cached->mtu_selector << 6) | cached->mtu;
-	out->path.packetlifetime =
-		(cached->packet_life_time_selector << 6) || cached->packet_life_time;
 	out->path.preference = cached->preference;
 }
 

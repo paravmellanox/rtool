@@ -76,6 +76,7 @@ struct thread_ctx {
 	struct ibv_comp_channel *cq_channel;
 	struct ibv_cq **cq_list;
 	struct mlx5dv_devx_obj **devx_cq_list;
+	uint32_t *devx_cq_handle;
 	struct ibv_qp **qp_list;
 	struct ibv_wq **wq_list;
 	struct ibv_rwq_ind_table **rq_ind_tbl_list;
@@ -582,6 +583,7 @@ static int alloc_resource_holder(const struct run_ctx *ctx,
 				fprintf(stderr, "Couldn't allocate devx cq list memory\n");
 				return -ENOMEM;
 			}
+			t->devx_cq_handle = calloc(ctx->count, sizeof(uint32_t));
 		} else {
 			t->cq_list = calloc(ctx->count, sizeof(struct ibv_cq*));
 			if (!t->cq_list) {
@@ -854,6 +856,8 @@ static int devx_alloc_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 		       errno, strerror(errno));
 		return errno;
 	}
+	t->devx_cq_handle[i] = mlx5dv_devx_obj_handle_query(t->devx_cq_list[i]);
+	printf("val = 0x%x\n", t->devx_cq_handle[i]);
 	return 0;
 
 err_reg_dbr:
@@ -1122,12 +1126,20 @@ static void free_mw(struct thread_ctx *t, int i)
 		ibv_dealloc_mw(t->u.mw_list[i]);
 }
 
-static void free_cq(struct thread_ctx *t, int i)
+static void free_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
+	printf("sleep started\n");
+	sleep(10);
+	printf("sleep end\n");
+
 	if (t->cq_list && t->cq_list[i])
 		ibv_destroy_cq(t->cq_list[i]);
-	else if (t->devx_cq_list && t->devx_cq_list[i])
-		mlx5dv_devx_obj_destroy(t->devx_cq_list[i]);
+	else if (t->devx_cq_list && t->devx_cq_list[i]) {
+		if (ctx->ioctl_destroy)
+			mlx5_ioctl_devx_obj_destroy(ctx->context->cmd_fd, t->devx_cq_handle[i]);
+		else
+			mlx5dv_devx_obj_destroy(t->devx_cq_list[i]);
+	}
 }
 
 static void free_qp(struct thread_ctx *t, int i)
@@ -1282,23 +1294,23 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 			free_mw(t, i);
 			break;
 		case RTYPE_CQ:
-			free_cq(t, i);
+			free_cq(ctx, t, i);
 			break;
 		case RTYPE_QP:
 			free_qp(t, i);
-			free_cq(t, i);
+			free_cq(ctx, t, i);
 			break;
 		case RTYPE_XRCD:
 			free_xrcd(t, i);
 			break;
 		case RTYPE_WQ:
 			free_wq(t, i);
-			free_cq(t, i);
+			free_cq(ctx, t, i);
 			break;
 		case RTYPE_RQ_IND_TBL:
 			free_rq_ind_tbl(t, i);
 			free_wq(t, i);
-			free_cq(t, i);
+			free_cq(ctx, t, i);
 			break;
 		case RTYPE_AH:
 			free_ah(t, i);
@@ -1306,11 +1318,11 @@ static void _free_resources(const struct run_ctx *ctx, struct thread_ctx *t, int
 		case RTYPE_FLOW:
 			free_flow(t, i);
 			free_qp(t, i);
-			free_cq(t, i);
+			free_cq(ctx, t, i);
 			break;
 		case RTYPE_CM_ID:
 			free_cm_id(t, i);
-			free_cq(t, i);
+			free_cq(ctx, t, i);
 			break;
 		}
 		ts_log_end_time(&stat);
@@ -1330,7 +1342,7 @@ static void free_resources(const struct run_ctx *ctx, struct thread_ctx *t)
 	if (type < 0)
 		return;
 
-	if (ctx->ioctl_destroy)
+	if (ctx->ioctl_destroy && !ctx->devx)
 		free_resources_ioctl(ctx, t, type);
 	else
 		_free_resources(ctx, t, type);

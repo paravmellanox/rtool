@@ -11,4 +11,5 @@ int rdma_core_destroy_rwq_ind_tbl_by_handle(int fd, uint32_t handle);
 int rdma_core_destroy_ah_by_handle(int fd, uint32_t handle);
 int rdma_core_destroy_flow_by_handle(int fd, uint32_t handle);
 
+int mlx5_ioctl_devx_obj_destroy(int cmd_fd, uint32_t handle);
 #endif
