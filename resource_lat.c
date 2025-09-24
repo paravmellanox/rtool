@@ -1137,10 +1137,6 @@ static void free_mw(struct thread_ctx *t, int i)
 
 static void free_cq(const struct run_ctx *ctx, struct thread_ctx *t, int i)
 {
-	printf("sleep started\n");
-	sleep(10);
-	printf("sleep end\n");
-
 	if (t->cq_list && t->cq_list[i])
 		ibv_destroy_cq(t->cq_list[i]);
 	else if (t->devx_cq_list && t->devx_cq_list[i]) {
